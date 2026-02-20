@@ -1,11 +1,33 @@
-import { createClient } from "@/lib/supabase/server";
-import { redirect } from "next/navigation";
+"use client";
 
-export default async function RegisterPage() {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+import { createClient } from "@/lib/supabase/client";
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 
-    if (user) redirect("/dashboard");
+export default function RegisterPage() {
+    const [loading, setLoading] = useState(true);
+    const router = useRouter();
+    const supabase = createClient();
+
+    useEffect(() => {
+        const checkUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (user) {
+                router.push("/dashboard");
+            } else {
+                setLoading(false);
+            }
+        };
+        checkUser();
+    }, [router, supabase]);
+
+    if (loading) {
+        return (
+            <div className="flex min-h-screen items-center justify-center bg-[#0A0A0B]">
+                <div className="h-8 w-8 animate-spin rounded-full border-4 border-purple-500 border-t-transparent"></div>
+            </div>
+        );
+    }
 
     return (
         <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
@@ -65,7 +87,7 @@ export default async function RegisterPage() {
 
                     <button
                         type="submit"
-                        className="w-full rounded-lg bg-gradient-to-r from-blue-600 to-purple-600 px-4 py-3 text-sm font-semibold text-white shadow-lg hover:from-blue-500 hover:to-purple-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-900 transition-all duration-300"
+                        className="w-full rounded-lg bg-gradient-to-r from-purple-600 to-fuchsia-600 px-4 py-3 text-sm font-semibold text-white shadow-lg hover:from-purple-500 hover:to-fuchsia-500 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 focus:ring-offset-slate-900 transition-all duration-300"
                     >
                         Crear Cuenta Gratis
                     </button>
@@ -73,7 +95,7 @@ export default async function RegisterPage() {
 
                 <p className="text-center text-sm text-slate-400">
                     ¿Ya tienes cuenta?{" "}
-                    <a href="/login" className="font-medium text-blue-400 hover:text-blue-300 transition-colors">
+                    <a href="/login" className="font-medium text-purple-400 hover:text-purple-300 transition-colors">
                         Inicia sesión
                     </a>
                 </p>

@@ -77,38 +77,73 @@ export default function VoiceRecorder() {
     const sendToGroq = async (audioBlob: Blob) => {
         setIsProcessing(true);
         try {
-            const formData = new FormData();
-            formData.append("file", audioBlob, "audio.webm");
+            let data;
 
-            const response = await fetch("/api/transcribe", {
-                method: "POST",
-                body: formData,
-            });
+            // Si estamos en Electron, usar el puente nativo para evitar depender de API routes
+            if ((window as any).electron && (window as any).electron.transcribeAudio) {
+                const arrayBuffer = await audioBlob.arrayBuffer();
+                data = await (window as any).electron.transcribeAudio(arrayBuffer);
+            } else {
+                // Fallback para web
+                const formData = new FormData();
+                formData.append("file", audioBlob, "audio.webm");
 
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error || "Error en el servidor");
+                const response = await fetch("/api/transcribe", {
+                    method: "POST",
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || "Error en el servidor de transcripción");
+                }
+                data = await response.json();
             }
 
-            const data = await response.json();
+            if (!data || !data.refined) {
+                throw new Error("No se recibió texto refinado");
+            }
+
             setRefinedText(data.refined);
 
-            // Auto-copy & Universal Type
-            if (data.refined) {
-                navigator.clipboard.writeText(data.refined);
+            // Guardar en la base de datos (Supabase)
+            try {
+                // En Electron, podemos usar el cliente de Supabase directamente si está configurado,
+                // Pero para mantener simplicidad usamos el endpoint si está disponible 
+                // o lo manejamos via IPC si fuera necesario. Por ahora, seguimos con el fetch
+                // ya que Supabase es una URL externa.
+                const saveResponse = await fetch("/api/transcriptions", {
+                    method: "POST",
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        original_text: data.original,
+                        refined_text: data.refined,
+                    }),
+                });
 
-                // Si estamos en Electron, escribir automáticamente en la ventana activa
-                if ((window as any).electron) {
-                    (window as any).electron.typeText(data.refined);
+                if (saveResponse.ok) {
+                    console.log("Transcripción guardada en la base de datos");
                 }
-
-                setCopied(true);
-                toast.success("¡Texto refinado y enviado!");
-                setTimeout(() => setCopied(false), 2000);
+            } catch (saveError) {
+                console.error("Error al persistir transcripción:", saveError);
             }
+
+            // Auto-copy & Universal Type
+            navigator.clipboard.writeText(data.refined);
+
+            if ((window as any).electron) {
+                (window as any).electron.typeText(data.refined);
+            }
+
+            setCopied(true);
+            toast.success("¡Texto refinado y enviado!");
+            setTimeout(() => setCopied(false), 2000);
+
         } catch (error: any) {
-            console.error("Error al procesar con Groq:", error);
-            toast.error("Error al procesar el audio: " + error.message);
+            console.error("Error al procesar audio:", error);
+            toast.error("Error: " + error.message);
         } finally {
             setIsProcessing(false);
         }
