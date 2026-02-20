@@ -16,7 +16,7 @@ export default function LandingPage() {
               <Mic className="w-4 h-4 text-white" />
             </div>
             <span className="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-gray-400 bg-clip-text text-transparent">
-              SoyVOZ
+              Voz Flow
             </span>
           </div>
           <div className="hidden md:flex items-center gap-10">

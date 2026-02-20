@@ -1,4 +1,4 @@
-# 🎙️ SoyVOZ — Flow-Style Intelligent Dictation
+# 🎙️ Voz Flow — Flow-Style Intelligent Dictation
 
 > Stop typing. Start flowing. Transform your speech into perfect text.
 

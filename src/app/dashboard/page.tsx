@@ -16,7 +16,7 @@ export default function DashboardPage() {
                             <Mic className="w-5 h-5 text-white" />
                         </div>
                         <div>
-                            <h1 className="text-xl font-bold tracking-tight">SoyVOZ Flow</h1>
+                            <h1 className="text-xl font-bold tracking-tight">Voz Flow</h1>
                             <p className="text-xs font-semibold text-gray-500 uppercase tracking-widest">Espacio Personal</p>
                         </div>
                     </div>

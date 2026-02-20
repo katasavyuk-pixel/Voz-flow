@@ -1,5 +1,5 @@
 {
-  "name": "soyvoz",
+  "name": "vozflow",
   "version": "0.1.0",
   "private": true,
   "main": "electron/main.js",
@@ -62,9 +62,9 @@
     "wait-on": "^9.0.4"
   },
   "build": {
-    "appId": "com.soyvoz.app",
-    "productName": "SoyVOZ",
-    "copyright": "Copyright © 2025 SoyVOZ",
+    "appId": "com.vozflow.app",
+    "productName": "Voz Flow",
+    "copyright": "Copyright © 2026 Voz Flow",
     "directories": {
       "output": "dist",
       "buildResources": "public"
