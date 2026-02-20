@@ -28,16 +28,12 @@ jobs:
       - name: Install Dependencies
         run: npm install
 
-      - name: Build Next.js App
-        run: npm run build
+      - name: Build and Package App
+        run: npm run electron-build
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-
-      - name: Build Electron App
-        run: npm run electron-build
-        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Artifacts
