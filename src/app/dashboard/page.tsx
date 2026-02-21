@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import {
   Mic,
   Square,
@@ -10,6 +10,7 @@ import {
   ArrowLeft,
   Keyboard,
   History,
+  Save,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
@@ -20,73 +21,37 @@ export default function DashboardPage() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [refinedText, setRefinedText] = useState("");
   const [copied, setCopied] = useState(false);
+  const [shortcutInput, setShortcutInput] = useState("");
+  const [activeShortcut, setActiveShortcut] = useState("-");
+  const [isSavingShortcut, setIsSavingShortcut] = useState(false);
   const [history, setHistory] = useState<
     Array<{ original: string; refined: string; date: Date }>
   >([]);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-
-  const toggleAction = () => {
-    if (isRecording) {
-      stopRecording();
-    } else {
-      startRecording();
-    }
-  };
+  const isRecordingRef = useRef(false);
 
   useEffect(() => {
-    if (typeof window !== "undefined" && (window as any).electron) {
-      (window as any).electron.onToggleRecording(() => {
-        if (isRecording) {
-          stopRecording();
-        } else {
-          startRecording();
-        }
-      });
-    }
-  }, [isRecording, startRecording, stopRecording]);
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
 
-  async function startRecording() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      chunksRef.current = [];
+  useEffect(() => {
+    const loadShortcut = async () => {
+      if (!(window as any).electron?.getShortcut) return;
+      try {
+        const shortcut = await (window as any).electron.getShortcut();
+        setActiveShortcut(shortcut);
+        setShortcutInput(shortcut);
+      } catch {
+        setActiveShortcut("-");
+      }
+    };
 
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
+    loadShortcut();
+  }, []);
 
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
-        await processAudio(audioBlob);
-      };
-
-      mediaRecorder.start();
-      setIsRecording(true);
-      setRefinedText("");
-      if ((window as any).electron)
-        (window as any).electron.setRecordingState(true);
-      toast.info("Grabando...");
-    } catch {
-      toast.error("No se pudo acceder al micrófono");
-    }
-  }
-
-  function stopRecording() {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      mediaRecorderRef.current.stream
-        .getTracks()
-        .forEach((track) => track.stop());
-      setIsRecording(false);
-      if ((window as any).electron)
-        (window as any).electron.setRecordingState(false);
-    }
-  }
-
-  const processAudio = async (audioBlob: Blob) => {
+  const processAudio = useCallback(async (audioBlob: Blob) => {
     setIsProcessing(true);
     try {
       let data;
@@ -120,12 +85,99 @@ export default function DashboardPage() {
     } finally {
       setIsProcessing(false);
     }
+  }, []);
+
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && isRecordingRef.current) {
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current.stream
+        .getTracks()
+        .forEach((track) => track.stop());
+      setIsRecording(false);
+      if ((window as any).electron)
+        (window as any).electron.setRecordingState(false);
+    }
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      chunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
+        await processAudio(audioBlob);
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      setRefinedText("");
+      if ((window as any).electron)
+        (window as any).electron.setRecordingState(true);
+      toast.info("Grabando...");
+    } catch {
+      toast.error("No se pudo acceder al micrófono");
+    }
+  }, [processAudio]);
+
+  const toggleAction = useCallback(() => {
+    if (isRecordingRef.current) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  }, [startRecording, stopRecording]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).electron) return;
+    const unsubscribe = (window as any).electron.onToggleRecording(() => {
+      toggleAction();
+    });
+
+    return () => {
+      if (typeof unsubscribe === "function") unsubscribe();
+    };
+  }, [toggleAction]);
+
+  const saveShortcut = async () => {
+    if (!(window as any).electron?.setShortcut) {
+      toast.info("Los atajos globales solo aplican en la app de escritorio");
+      return;
+    }
+
+    const candidate = shortcutInput.trim();
+    if (!candidate) {
+      toast.error("Escribe un atajo válido");
+      return;
+    }
+
+    setIsSavingShortcut(true);
+    try {
+      const result = await (window as any).electron.setShortcut(candidate);
+      if (!result?.ok) {
+        toast.error(result?.error || "No se pudo guardar el atajo");
+        return;
+      }
+      setActiveShortcut(result.shortcut);
+      setShortcutInput(result.shortcut);
+      toast.success(`Atajo guardado: ${result.shortcut}`);
+    } catch {
+      toast.error("No se pudo guardar el atajo");
+    } finally {
+      setIsSavingShortcut(false);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-[#0A0A0B] text-white p-6 relative overflow-hidden">
-      <div className="fixed -top-40 -left-40 w-[500px] h-[500px] bg-purple-600/10 blur-[100px] rounded-full pointer-events-none" />
-      <div className="fixed -bottom-40 -right-40 w-[500px] h-[500px] bg-cyan-500/10 blur-[100px] rounded-full pointer-events-none" />
+    <div className="min-h-screen bg-[#0A0A0B] text-white p-4 md:p-6 relative overflow-hidden">
+      <div className="fixed -top-32 -left-32 w-[360px] h-[360px] md:w-[500px] md:h-[500px] bg-purple-600/10 blur-[80px] md:blur-[100px] rounded-full pointer-events-none" />
+      <div className="fixed -bottom-32 -right-32 w-[360px] h-[360px] md:w-[500px] md:h-[500px] bg-cyan-500/10 blur-[80px] md:blur-[100px] rounded-full pointer-events-none" />
 
       <div className="mx-auto max-w-4xl relative z-10">
         <header className="flex items-center justify-between mb-12">
@@ -147,17 +199,19 @@ export default function DashboardPage() {
         </header>
 
         <main className="flex flex-col items-center">
-          <div className="text-center mb-10">
-            <h2 className="text-4xl font-black mb-3">¿Qué quieres decir?</h2>
+          <div className="text-center mb-8 md:mb-10">
+            <h2 className="text-3xl md:text-4xl font-black mb-3">
+              ¿Qué quieres decir?
+            </h2>
             <p className="text-gray-400 max-w-md mx-auto">
               Presiona el micrófono o usa{" "}
               <kbd className="px-2 py-0.5 rounded bg-white/10 font-mono text-xs">
-                Alt + Space
+                {activeShortcut}
               </kbd>
             </p>
           </div>
 
-          <div className="w-full max-w-xl p-8 rounded-[32px] bg-[#111112] border border-white/10 shadow-2xl mb-8">
+          <div className="w-full max-w-xl p-5 md:p-8 rounded-[28px] md:rounded-[32px] bg-[#111112] border border-white/10 shadow-2xl mb-8">
             <div className="flex flex-col items-center gap-6">
               <div className="relative">
                 <AnimatePresence>
@@ -258,7 +312,25 @@ export default function DashboardPage() {
                   Atajo Global
                 </span>
               </div>
-              <p className="text-sm text-gray-300 font-mono">Alt + Space</p>
+              <p className="text-sm text-gray-300 font-mono mb-2">
+                {activeShortcut}
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  value={shortcutInput}
+                  onChange={(e) => setShortcutInput(e.target.value)}
+                  placeholder="Ej: CommandOrControl+Shift+Space"
+                  className="w-full rounded-lg bg-black/30 border border-white/10 px-3 py-2 text-xs text-gray-200 placeholder:text-gray-500"
+                />
+                <button
+                  onClick={saveShortcut}
+                  disabled={isSavingShortcut}
+                  className="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 transition-all disabled:opacity-50"
+                  title="Guardar atajo"
+                >
+                  <Save className="w-4 h-4" />
+                </button>
+              </div>
             </div>
             <div className="p-5 rounded-2xl border border-white/5 bg-white/5">
               <div className="flex items-center gap-2 mb-2">

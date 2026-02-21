@@ -17,6 +17,7 @@ let mainWindow;
 let indicatorWindow;
 let tray = null;
 let activeShortcut = null;
+app.isQuitting = false;
 const defaultShortcuts = [
   "CommandOrControl+Shift+Space",
   "Control+Space",
@@ -88,29 +89,6 @@ function registerRecordingShortcut(preferredShortcut, allowFallback = true) {
   return null;
 }
 
-function registerRecordingShortcut() {
-  const candidates = [
-    "CommandOrControl+Shift+Space",
-    "Control+Space",
-    "Alt+Space",
-  ];
-
-  for (const shortcut of candidates) {
-    const ok = globalShortcut.register(shortcut, () => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("toggle-recording");
-      }
-    });
-
-    if (ok) {
-      activeShortcut = shortcut;
-      return shortcut;
-    }
-  }
-
-  return null;
-}
-
 function getDockIconPath() {
   if (isDev) {
     return path.join(__dirname, "../public/icon.png");
@@ -145,7 +123,7 @@ function createTray() {
     {
       label: "Salir",
       click: () => {
-        app.isQuiting = true;
+        app.isQuitting = true;
         app.quit();
       },
     },
@@ -155,6 +133,7 @@ function createTray() {
   tray.setContextMenu(contextMenu);
 
   tray.on("click", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
   });
 }
@@ -223,6 +202,7 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
       contextIsolation: true,
+      backgroundThrottling: false,
     },
   });
 
@@ -242,7 +222,7 @@ function createWindow() {
   createIndicatorWindow();
 
   mainWindow.on("close", (event) => {
-    if (!app.isQuiting) {
+    if (!app.isQuitting) {
       event.preventDefault();
       mainWindow.hide();
     }
@@ -272,6 +252,17 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", () => {
+  app.isQuitting = true;
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
+  if (indicatorWindow && !indicatorWindow.isDestroyed()) {
+    indicatorWindow.destroy();
+  }
 });
 
 app.on("will-quit", () => {
@@ -350,7 +341,6 @@ ipcMain.handle("transcribe-audio", async (event, audioBuffer) => {
     });
 
     // 1. Transcribir con Groq Whisper
-    const fs = require("fs");
     const tempPath = path.join(app.getPath("temp"), `audio_${Date.now()}.webm`);
     fs.writeFileSync(tempPath, Buffer.from(audioBuffer));
 
