@@ -1,0 +1,42 @@
+﻿Ôû▓ Next.js 16.1.6 (Turbopack)
+
+npx : ÔÜá The 
+"middleware" file 
+convention is 
+deprecated. Please 
+use "proxy" instead. 
+Learn more: https://ne
+xtjs.org/docs/messages
+/middleware-to-proxy
+En línea: 1 Carácter: 
+1
++ npx next build > 
+build_log.txt 2>&1
++ ~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~
+    + CategoryInfo    
+          : NotSpeci  
+  fied: (ÔÜá The "m   
+ iddle...leware-to    
+-proxy:String) []    
+, RemoteException
+    + FullyQualifiedE 
+   rrorId : NativeCo  
+  mmandError
+ 
+  Creating an optimized production build ...
+
+> Build error occurred
+Error: Turbopack 
+build failed with 1 
+errors:
+./src/app/dashboard
+You cannot have two 
+parallel pages that 
+resolve to the same 
+path. Please check /(d
+ashboard)/dashboard 
+and /dashboard.
+
+    at ignore-listed 
+frames

@@ -1,0 +1,11 @@
+▲ Next.js 16.1.6 (Turbopack)
+
+⚠ The "middleware" file convention is deprecated. Please use "proxy" instead. Learn more: https://nextjs.org/docs/messages/middleware-to-proxy
+  Creating an optimized production build ...
+
+> Build error occurred
+Error: Turbopack build failed with 1 errors:
+./src/app/dashboard
+You cannot have two parallel pages that resolve to the same path. Please check /(dashboard)/dashboard and /dashboard.
+
+    at ignore-listed frames
