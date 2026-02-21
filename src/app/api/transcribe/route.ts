@@ -2,12 +2,18 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import Groq from "groq-sdk";
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
-
 export async function POST(req: NextRequest) {
   try {
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "GROQ_API_KEY no está configurada" },
+        { status: 500 },
+      );
+    }
+
+    const groq = new Groq({ apiKey });
+
     const formData = await req.formData();
     const file = formData.get("file") as Blob;
 

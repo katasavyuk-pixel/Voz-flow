@@ -1,10 +1,10 @@
 import type { NextConfig } from "next";
 
-const isElectron = process.env.ELECTRON_BUILD === 'true';
+const isElectron = process.env.ELECTRON_BUILD === "true";
 
 const nextConfig: NextConfig = {
-  output: 'export',
-  assetPrefix: isElectron ? './' : undefined,
+  output: isElectron ? "export" : undefined,
+  assetPrefix: isElectron ? "./" : undefined,
   images: {
     unoptimized: true,
   },
