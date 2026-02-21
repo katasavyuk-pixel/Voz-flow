@@ -133,8 +133,21 @@ function createTray() {
   tray.setContextMenu(contextMenu);
 
   tray.on("click", () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      createWindow();
+      return;
+    }
+
+    if (mainWindow.webContents.isCrashed()) {
+      mainWindow.reload();
+    }
+
+    if (mainWindow.webContents.getURL() === "about:blank") {
+      mainWindow.reload();
+    }
+
+    mainWindow.show();
+    mainWindow.focus();
   });
 }
 
@@ -222,6 +235,18 @@ function createWindow() {
   const url = isDev ? "http://localhost:3333/dashboard" : `file://${prodFile}`;
 
   win.loadURL(url);
+
+  win.webContents.on("render-process-gone", () => {
+    if (!win.isDestroyed()) {
+      win.reload();
+    }
+  });
+
+  win.on("show", () => {
+    if (!win.isDestroyed() && win.webContents.getURL() === "about:blank") {
+      win.loadURL(url);
+    }
+  });
 
   win.once("ready-to-show", () => {
     if (!win.isDestroyed()) {
