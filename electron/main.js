@@ -15,6 +15,30 @@ const { exec } = require("child_process");
 let mainWindow;
 let indicatorWindow;
 let tray = null;
+let activeShortcut = null;
+
+function registerRecordingShortcut() {
+  const candidates = [
+    "CommandOrControl+Shift+Space",
+    "Control+Space",
+    "Alt+Space",
+  ];
+
+  for (const shortcut of candidates) {
+    const ok = globalShortcut.register(shortcut, () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("toggle-recording");
+      }
+    });
+
+    if (ok) {
+      activeShortcut = shortcut;
+      return shortcut;
+    }
+  }
+
+  return null;
+}
 
 function getDockIconPath() {
   if (isDev) {
@@ -56,7 +80,8 @@ function createTray() {
     },
   ]);
 
-  tray.setToolTip("Voz Flow - Dictado AI");
+  const shortcutHint = activeShortcut ? ` (${activeShortcut})` : "";
+  tray.setToolTip(`Voz Flow - Dictado AI${shortcutHint}`);
   tray.setContextMenu(contextMenu);
 
   tray.on("click", () => {
@@ -141,13 +166,7 @@ function createWindow() {
     mainWindow.show();
   });
 
-  // Atajo Global Recomendado: Control+Alt+S (Menos conflictos)
-  // Opcionalmente: Alt+Space es muy Flow, lo mantendremos como default por ahora.
-  const shortcut = "Alt+Space";
-
-  globalShortcut.register(shortcut, () => {
-    mainWindow.webContents.send("toggle-recording");
-  });
+  registerRecordingShortcut();
 
   createTray();
   createIndicatorWindow();
