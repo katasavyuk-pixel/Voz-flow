@@ -9,6 +9,7 @@ const {
   nativeImage,
 } = require("electron");
 const path = require("path");
+const fs = require("fs");
 const isDev = !app.isPackaged;
 const { exec } = require("child_process");
 
@@ -16,6 +17,76 @@ let mainWindow;
 let indicatorWindow;
 let tray = null;
 let activeShortcut = null;
+const defaultShortcuts = [
+  "CommandOrControl+Shift+Space",
+  "Control+Space",
+  "Alt+Space",
+];
+
+function getSettingsPath() {
+  return path.join(app.getPath("userData"), "settings.json");
+}
+
+function loadSavedShortcut() {
+  try {
+    const settingsPath = getSettingsPath();
+    if (!fs.existsSync(settingsPath)) return null;
+    const data = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    return typeof data.shortcut === "string" ? data.shortcut.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveShortcut(shortcut) {
+  try {
+    fs.writeFileSync(
+      getSettingsPath(),
+      JSON.stringify({ shortcut }, null, 2),
+      "utf8",
+    );
+  } catch (error) {
+    console.error("No se pudo guardar el atajo:", error);
+  }
+}
+
+function updateTrayTooltip() {
+  if (!tray) return;
+  const shortcutHint = activeShortcut ? ` (${activeShortcut})` : "";
+  tray.setToolTip(`Voz Flow - Dictado AI${shortcutHint}`);
+}
+
+function registerRecordingShortcut(preferredShortcut, allowFallback = true) {
+  if (activeShortcut) {
+    globalShortcut.unregister(activeShortcut);
+    activeShortcut = null;
+  }
+
+  const candidates = [];
+  if (preferredShortcut) candidates.push(preferredShortcut);
+  if (allowFallback) {
+    defaultShortcuts.forEach((shortcut) => {
+      if (!candidates.includes(shortcut)) candidates.push(shortcut);
+    });
+  }
+
+  for (const shortcut of candidates) {
+    const ok = globalShortcut.register(shortcut, () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("toggle-recording");
+      }
+    });
+
+    if (ok) {
+      activeShortcut = shortcut;
+      updateTrayTooltip();
+      return shortcut;
+    }
+  }
+
+  updateTrayTooltip();
+  return null;
+}
 
 function registerRecordingShortcut() {
   const candidates = [
@@ -80,8 +151,7 @@ function createTray() {
     },
   ]);
 
-  const shortcutHint = activeShortcut ? ` (${activeShortcut})` : "";
-  tray.setToolTip(`Voz Flow - Dictado AI${shortcutHint}`);
+  updateTrayTooltip();
   tray.setContextMenu(contextMenu);
 
   tray.on("click", () => {
@@ -157,8 +227,8 @@ function createWindow() {
   });
 
   const url = isDev
-    ? "http://localhost:3333"
-    : `file://${path.join(__dirname, "../out/index.html")}`;
+    ? "http://localhost:3333/dashboard"
+    : `file://${path.join(__dirname, "../out/dashboard/index.html")}`;
 
   mainWindow.loadURL(url);
 
@@ -166,7 +236,7 @@ function createWindow() {
     mainWindow.show();
   });
 
-  registerRecordingShortcut();
+  registerRecordingShortcut(loadSavedShortcut(), true);
 
   createTray();
   createIndicatorWindow();
@@ -202,6 +272,34 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("will-quit", () => {
+  globalShortcut.unregisterAll();
+});
+
+ipcMain.handle("get-shortcut", () => {
+  return activeShortcut || loadSavedShortcut() || defaultShortcuts[0];
+});
+
+ipcMain.handle("set-shortcut", (event, rawShortcut) => {
+  const shortcut = String(rawShortcut || "").trim();
+  if (!shortcut) {
+    return { ok: false, error: "Atajo vacío" };
+  }
+
+  const registered = registerRecordingShortcut(shortcut, false);
+  if (!registered) {
+    registerRecordingShortcut(loadSavedShortcut(), true);
+    return {
+      ok: false,
+      error:
+        "Atajo no válido o en uso por otra app. Prueba CommandOrControl+Shift+Space.",
+    };
+  }
+
+  saveShortcut(registered);
+  return { ok: true, shortcut: registered };
 });
 
 ipcMain.on("recording-state", (event, isRecording) => {
