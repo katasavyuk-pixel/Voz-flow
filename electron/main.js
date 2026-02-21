@@ -190,7 +190,7 @@ function createIndicatorWindow() {
 }
 
 function createWindow() {
-  mainWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     width: 1100,
     height: 750,
     minWidth: 900,
@@ -205,15 +205,28 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
+  mainWindow = win;
 
-  const url = isDev
-    ? "http://localhost:3333/dashboard"
-    : `file://${path.join(__dirname, "../out/dashboard/index.html")}`;
+  const prodDashboardHtml = path.join(__dirname, "../out/dashboard.html");
+  const prodDashboardIndex = path.join(
+    __dirname,
+    "../out/dashboard/index.html",
+  );
+  const prodFallback = path.join(__dirname, "../out/index.html");
+  const prodFile = fs.existsSync(prodDashboardHtml)
+    ? prodDashboardHtml
+    : fs.existsSync(prodDashboardIndex)
+      ? prodDashboardIndex
+      : prodFallback;
 
-  mainWindow.loadURL(url);
+  const url = isDev ? "http://localhost:3333/dashboard" : `file://${prodFile}`;
 
-  mainWindow.once("ready-to-show", () => {
-    mainWindow.show();
+  win.loadURL(url);
+
+  win.once("ready-to-show", () => {
+    if (!win.isDestroyed()) {
+      win.show();
+    }
   });
 
   registerRecordingShortcut(loadSavedShortcut(), true);
@@ -221,16 +234,21 @@ function createWindow() {
   createTray();
   createIndicatorWindow();
 
-  mainWindow.on("close", (event) => {
+  win.on("close", (event) => {
     if (!app.isQuitting) {
       event.preventDefault();
-      mainWindow.hide();
+      if (!win.isDestroyed()) {
+        win.hide();
+      }
     }
   });
 
-  mainWindow.on("closed", () => {
+  win.on("closed", () => {
     mainWindow = null;
-    if (indicatorWindow) indicatorWindow.close();
+    if (indicatorWindow && !indicatorWindow.isDestroyed()) {
+      indicatorWindow.close();
+    }
+    indicatorWindow = null;
   });
 }
 
