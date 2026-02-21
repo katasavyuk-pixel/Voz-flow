@@ -16,6 +16,16 @@ let mainWindow;
 let indicatorWindow;
 let tray = null;
 
+function getDockIconPath() {
+  if (isDev) {
+    return path.join(__dirname, "../public/icon.png");
+  }
+
+  const prodPng = path.join(process.resourcesPath, "icon.png");
+  const prodIcns = path.join(process.resourcesPath, "icon.icns");
+  return require("fs").existsSync(prodPng) ? prodPng : prodIcns;
+}
+
 function createTray() {
   const iconPath = isDev
     ? path.join(__dirname, "../public/tray-icon.png")
@@ -156,6 +166,14 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === "darwin" && app.dock) {
+    try {
+      app.dock.setIcon(getDockIconPath());
+    } catch (error) {
+      console.error("No se pudo aplicar el icono del Dock:", error);
+    }
+  }
+
   createWindow();
 
   app.on("activate", () => {
