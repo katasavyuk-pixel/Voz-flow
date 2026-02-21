@@ -10,7 +10,6 @@ import {
   ArrowLeft,
   Keyboard,
   History,
-  Settings,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
@@ -20,7 +19,6 @@ export default function DashboardPage() {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [refinedText, setRefinedText] = useState("");
-  const [originalText, setOriginalText] = useState("");
   const [copied, setCopied] = useState(false);
   const [history, setHistory] = useState<
     Array<{ original: string; refined: string; date: Date }>
@@ -28,14 +26,6 @@ export default function DashboardPage() {
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-
-  useEffect(() => {
-    if (typeof window !== "undefined" && (window as any).electron) {
-      (window as any).electron.onToggleRecording(() => {
-        toggleAction();
-      });
-    }
-  }, [isRecording]);
 
   const toggleAction = () => {
     if (isRecording) {
@@ -45,7 +35,19 @@ export default function DashboardPage() {
     }
   };
 
-  const startRecording = async () => {
+  useEffect(() => {
+    if (typeof window !== "undefined" && (window as any).electron) {
+      (window as any).electron.onToggleRecording(() => {
+        if (isRecording) {
+          stopRecording();
+        } else {
+          startRecording();
+        }
+      });
+    }
+  }, [isRecording, startRecording, stopRecording]);
+
+  async function startRecording() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
@@ -64,16 +66,15 @@ export default function DashboardPage() {
       mediaRecorder.start();
       setIsRecording(true);
       setRefinedText("");
-      setOriginalText("");
       if ((window as any).electron)
         (window as any).electron.setRecordingState(true);
       toast.info("Grabando...");
-    } catch (err) {
+    } catch {
       toast.error("No se pudo acceder al micrófono");
     }
-  };
+  }
 
-  const stopRecording = () => {
+  function stopRecording() {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       mediaRecorderRef.current.stream
@@ -83,7 +84,7 @@ export default function DashboardPage() {
       if ((window as any).electron)
         (window as any).electron.setRecordingState(false);
     }
-  };
+  }
 
   const processAudio = async (audioBlob: Blob) => {
     setIsProcessing(true);
@@ -103,7 +104,6 @@ export default function DashboardPage() {
         data = await response.json();
       }
 
-      setOriginalText(data.original);
       setRefinedText(data.refined);
       setHistory((prev) => [
         { original: data.original, refined: data.refined, date: new Date() },
@@ -240,7 +240,6 @@ export default function DashboardPage() {
                   <button
                     onClick={() => {
                       setRefinedText("");
-                      setOriginalText("");
                     }}
                     className="px-5 py-2.5 rounded-full bg-white/5 border border-white/10 text-sm font-medium text-gray-400 hover:bg-white/10 transition-all"
                   >
@@ -287,7 +286,6 @@ export default function DashboardPage() {
                     className="p-4 rounded-xl border border-white/5 bg-white/5 hover:bg-white/10 transition-all cursor-pointer"
                     onClick={() => {
                       setRefinedText(item.refined);
-                      setOriginalText(item.original);
                     }}
                   >
                     <p className="text-sm text-gray-300 line-clamp-2">
