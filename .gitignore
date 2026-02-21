@@ -26,6 +26,9 @@ yarn-error.log*
 # macOS
 .DS_Store
 
+# nested local repos
+whisper-flow/
+
 # electron
 /dist/
 /release/
