@@ -378,7 +378,7 @@ export default function LandingPage() {
           <p className="text-gray-400 text-lg mb-12">
             App de escritorio con atajo global. Presiona{" "}
             <kbd className="px-2 py-1 rounded bg-white/10 text-white font-mono text-sm">
-              Alt + Space
+              Command + Option + R
             </kbd>{" "}
             para grabar desde cualquier aplicación.
           </p>

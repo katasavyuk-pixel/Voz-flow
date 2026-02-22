@@ -19,36 +19,127 @@ let tray = null;
 let activeShortcut = null;
 app.isQuitting = false;
 const defaultShortcuts = [
-  "CommandOrControl+Shift+Space",
-  "Control+Space",
-  "Alt+Space",
+  "CommandOrControl+Alt+R",
+  "CommandOrControl+Alt+D",
+  "CommandOrControl+Alt+V",
 ];
 
 function getSettingsPath() {
   return path.join(app.getPath("userData"), "settings.json");
 }
 
-function loadSavedShortcut() {
+function loadSettings() {
   try {
     const settingsPath = getSettingsPath();
-    if (!fs.existsSync(settingsPath)) return null;
+    if (!fs.existsSync(settingsPath)) return {};
     const data = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    return typeof data.shortcut === "string" ? data.shortcut.trim() : null;
+    return typeof data === "object" && data ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSettings(nextData) {
+  try {
+    const current = loadSettings();
+    const merged = { ...current, ...nextData };
+    fs.writeFileSync(
+      getSettingsPath(),
+      JSON.stringify(merged, null, 2),
+      "utf8",
+    );
+    return merged;
   } catch {
     return null;
   }
 }
 
-function saveShortcut(shortcut) {
-  try {
-    fs.writeFileSync(
-      getSettingsPath(),
-      JSON.stringify({ shortcut }, null, 2),
-      "utf8",
-    );
-  } catch (error) {
-    console.error("No se pudo guardar el atajo:", error);
+function loadSavedShortcut() {
+  const settings = loadSettings();
+  return typeof settings.shortcut === "string"
+    ? settings.shortcut.trim()
+    : null;
+}
+
+function loadSavedApiKey() {
+  const settings = loadSettings();
+  return typeof settings.groqApiKey === "string"
+    ? settings.groqApiKey.trim()
+    : "";
+}
+
+function normalizeShortcut(rawShortcut) {
+  const parts = String(rawShortcut || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .split("+")
+    .filter(Boolean);
+
+  if (!parts.length) return { ok: false, error: "Atajo vacío" };
+
+  const modifiers = [];
+  let key = null;
+
+  const mapToken = (token) => {
+    const t = token.toLowerCase();
+    if (t === "cmd" || t === "command" || t === "commandorcontrol") {
+      return "CommandOrControl";
+    }
+    if (t === "ctrl" || t === "control") return "Control";
+    if (t === "opt" || t === "option" || t === "alt") return "Alt";
+    if (t === "shift") return "Shift";
+    if (t === "space" || t === "spacebar") return "Space";
+    if (t === "fn" || t === "function") return "Fn";
+    return token.length === 1 ? token.toUpperCase() : token;
+  };
+
+  for (const token of parts) {
+    const mapped = mapToken(token);
+    if (mapped === "Fn") {
+      return {
+        ok: false,
+        error:
+          "La tecla fn sola no se puede usar como atajo global en macOS/Electron.",
+      };
+    }
+
+    if (["CommandOrControl", "Control", "Alt", "Shift"].includes(mapped)) {
+      if (!modifiers.includes(mapped)) modifiers.push(mapped);
+      continue;
+    }
+
+    if (key) {
+      return {
+        ok: false,
+        error: "Atajo inválido: solo puede haber una tecla final",
+      };
+    }
+    key = mapped;
   }
+
+  if (!key) {
+    return {
+      ok: false,
+      error: "Falta la tecla final (por ejemplo: R, D o V)",
+    };
+  }
+
+  if (key === "Space") {
+    return {
+      ok: false,
+      error: "No usamos Space porque da conflictos. Usa Command+Option+letra.",
+    };
+  }
+
+  if (!modifiers.includes("CommandOrControl") || !modifiers.includes("Alt")) {
+    return {
+      ok: false,
+      error:
+        "El atajo debe incluir Command y Option (ejemplo: CommandOrControl+Alt+R).",
+    };
+  }
+
+  return { ok: true, shortcut: [...modifiers, key].join("+") };
 }
 
 function updateTrayTooltip() {
@@ -254,7 +345,12 @@ function createWindow() {
     }
   });
 
-  registerRecordingShortcut(loadSavedShortcut(), true);
+  const savedShortcut = loadSavedShortcut();
+  const normalizedSaved = normalizeShortcut(savedShortcut);
+  const preferredShortcut = normalizedSaved.ok
+    ? normalizedSaved.shortcut
+    : null;
+  registerRecordingShortcut(preferredShortcut, true);
 
   createTray();
   createIndicatorWindow();
@@ -313,27 +409,51 @@ app.on("will-quit", () => {
 });
 
 ipcMain.handle("get-shortcut", () => {
-  return activeShortcut || loadSavedShortcut() || defaultShortcuts[0];
+  const savedShortcut = loadSavedShortcut();
+  const normalizedSaved = normalizeShortcut(savedShortcut);
+  return (
+    activeShortcut ||
+    (normalizedSaved.ok ? normalizedSaved.shortcut : defaultShortcuts[0])
+  );
 });
 
 ipcMain.handle("set-shortcut", (event, rawShortcut) => {
-  const shortcut = String(rawShortcut || "").trim();
-  if (!shortcut) {
-    return { ok: false, error: "Atajo vacío" };
+  const normalized = normalizeShortcut(rawShortcut);
+  if (!normalized.ok) {
+    return { ok: false, error: normalized.error };
   }
 
+  const shortcut = normalized.shortcut;
   const registered = registerRecordingShortcut(shortcut, false);
   if (!registered) {
     registerRecordingShortcut(loadSavedShortcut(), true);
     return {
       ok: false,
       error:
-        "Atajo no válido o en uso por otra app. Prueba CommandOrControl+Shift+Space.",
+        "Atajo no válido o en uso por otra app. Prueba CommandOrControl+Alt+R.",
     };
   }
 
-  saveShortcut(registered);
+  saveSettings({ shortcut: registered });
   return { ok: true, shortcut: registered };
+});
+
+ipcMain.handle("get-api-key", () => {
+  return loadSavedApiKey();
+});
+
+ipcMain.handle("set-api-key", (event, rawApiKey) => {
+  const apiKey = String(rawApiKey || "").trim();
+  if (!apiKey) {
+    return { ok: false, error: "La API key no puede estar vacía" };
+  }
+
+  const saved = saveSettings({ groqApiKey: apiKey });
+  if (!saved) {
+    return { ok: false, error: "No se pudo guardar la API key" };
+  }
+
+  return { ok: true };
 });
 
 ipcMain.on("recording-state", (event, isRecording) => {
@@ -378,9 +498,16 @@ ipcMain.on("type-text", (event, text) => {
 
 ipcMain.handle("transcribe-audio", async (event, audioBuffer) => {
   try {
+    const apiKey = process.env.GROQ_API_KEY || loadSavedApiKey();
+    if (!apiKey) {
+      throw new Error(
+        "Falta GROQ_API_KEY. Abre Dashboard y guarda tu API key de Groq en Configuracion.",
+      );
+    }
+
     const Groq = require("groq-sdk");
     const groq = new Groq({
-      apiKey: process.env.GROQ_API_KEY,
+      apiKey,
     });
 
     // 1. Transcribir con Groq Whisper

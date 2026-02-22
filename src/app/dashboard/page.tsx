@@ -24,6 +24,10 @@ export default function DashboardPage() {
   const [shortcutInput, setShortcutInput] = useState("");
   const [activeShortcut, setActiveShortcut] = useState("-");
   const [isSavingShortcut, setIsSavingShortcut] = useState(false);
+  const [isCapturingShortcut, setIsCapturingShortcut] = useState(false);
+  const [shortcutSavedFlash, setShortcutSavedFlash] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [isSavingApiKey, setIsSavingApiKey] = useState(false);
   const [history, setHistory] = useState<
     Array<{ original: string; refined: string; date: Date }>
   >([]);
@@ -43,6 +47,11 @@ export default function DashboardPage() {
         const shortcut = await (window as any).electron.getShortcut();
         setActiveShortcut(shortcut);
         setShortcutInput(shortcut);
+
+        if ((window as any).electron?.getApiKey) {
+          const currentApiKey = await (window as any).electron.getApiKey();
+          if (currentApiKey) setApiKeyInput(currentApiKey);
+        }
       } catch {
         setActiveShortcut("-");
       }
@@ -145,13 +154,13 @@ export default function DashboardPage() {
     };
   }, [toggleAction]);
 
-  const saveShortcut = async () => {
+  const saveShortcutValue = useCallback(async (rawShortcut: string) => {
     if (!(window as any).electron?.setShortcut) {
       toast.info("Los atajos globales solo aplican en la app de escritorio");
       return;
     }
 
-    const candidate = shortcutInput.trim();
+    const candidate = rawShortcut.trim();
     if (!candidate) {
       toast.error("Escribe un atajo válido");
       return;
@@ -166,11 +175,90 @@ export default function DashboardPage() {
       }
       setActiveShortcut(result.shortcut);
       setShortcutInput(result.shortcut);
+      setShortcutSavedFlash(true);
+      setTimeout(() => setShortcutSavedFlash(false), 1800);
       toast.success(`Atajo guardado: ${result.shortcut}`);
     } catch {
       toast.error("No se pudo guardar el atajo");
     } finally {
       setIsSavingShortcut(false);
+    }
+  }, []);
+
+  const saveShortcut = async () => {
+    await saveShortcutValue(shortcutInput);
+  };
+
+  useEffect(() => {
+    if (!isCapturingShortcut) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const isModifierOnly =
+        event.key === "Meta" ||
+        event.key === "Control" ||
+        event.key === "Shift" ||
+        event.key === "Alt";
+
+      if (isModifierOnly) return;
+
+      const modifiers: string[] = [];
+      if (event.metaKey || event.ctrlKey) modifiers.push("CommandOrControl");
+      if (event.shiftKey) modifiers.push("Shift");
+      if (event.altKey) modifiers.push("Alt");
+
+      let finalKey = event.key;
+      if (finalKey === " ") finalKey = "Space";
+      if (finalKey.length === 1) finalKey = finalKey.toUpperCase();
+
+      if (finalKey === "Space") {
+        setIsCapturingShortcut(false);
+        toast.error("No usamos Space. Pulsa Command + Option + una letra");
+        return;
+      }
+
+      if (!event.altKey || (!event.metaKey && !event.ctrlKey)) {
+        setIsCapturingShortcut(false);
+        toast.error("Debe incluir Command y Option");
+        return;
+      }
+
+      const accelerator = [...modifiers, finalKey].join("+");
+      setShortcutInput(accelerator);
+      setIsCapturingShortcut(false);
+      void saveShortcutValue(accelerator);
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [isCapturingShortcut, saveShortcutValue]);
+
+  const saveApiKey = async () => {
+    if (!(window as any).electron?.setApiKey) {
+      toast.info("La API key local solo aplica en la app de escritorio");
+      return;
+    }
+
+    const candidate = apiKeyInput.trim();
+    if (!candidate) {
+      toast.error("Escribe tu GROQ API key");
+      return;
+    }
+
+    setIsSavingApiKey(true);
+    try {
+      const result = await (window as any).electron.setApiKey(candidate);
+      if (!result?.ok) {
+        toast.error(result?.error || "No se pudo guardar la API key");
+        return;
+      }
+      toast.success("API key guardada correctamente");
+    } catch {
+      toast.error("No se pudo guardar la API key");
+    } finally {
+      setIsSavingApiKey(false);
     }
   };
 
@@ -304,7 +392,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="w-full grid sm:grid-cols-2 gap-4 opacity-70">
+          <div className="w-full grid sm:grid-cols-2 gap-4 opacity-80">
             <div className="p-5 rounded-2xl border border-white/5 bg-white/5">
               <div className="flex items-center gap-2 mb-2">
                 <Keyboard className="w-4 h-4 text-purple-400" />
@@ -315,13 +403,29 @@ export default function DashboardPage() {
               <p className="text-sm text-gray-300 font-mono mb-2">
                 {activeShortcut}
               </p>
+              {shortcutSavedFlash && (
+                <p className="text-[11px] text-emerald-400 mb-2">
+                  Atajo activo
+                </p>
+              )}
               <div className="flex items-center gap-2">
                 <input
                   value={shortcutInput}
-                  onChange={(e) => setShortcutInput(e.target.value)}
-                  placeholder="Ej: CommandOrControl+Shift+Space"
+                  readOnly
+                  placeholder="Captura: Command + Option + letra"
                   className="w-full rounded-lg bg-black/30 border border-white/10 px-3 py-2 text-xs text-gray-200 placeholder:text-gray-500"
                 />
+                <button
+                  onClick={() => setIsCapturingShortcut((prev) => !prev)}
+                  className={`px-3 py-2 rounded-lg transition-all ${
+                    isCapturingShortcut
+                      ? "bg-cyan-500/20 border border-cyan-400/40"
+                      : "bg-white/10 hover:bg-white/20"
+                  }`}
+                  title="Capturar atajo"
+                >
+                  {isCapturingShortcut ? "Teclea..." : "Capturar"}
+                </button>
                 <button
                   onClick={saveShortcut}
                   disabled={isSavingShortcut}
@@ -331,15 +435,49 @@ export default function DashboardPage() {
                   <Save className="w-4 h-4" />
                 </button>
               </div>
+              <div className="flex flex-wrap gap-2 mt-2">
+                {[
+                  "CommandOrControl+Alt+R",
+                  "CommandOrControl+Alt+D",
+                  "CommandOrControl+Alt+V",
+                ].map((preset) => (
+                  <button
+                    key={preset}
+                    onClick={() => setShortcutInput(preset)}
+                    className="text-[10px] px-2 py-1 rounded bg-white/5 border border-white/10 hover:bg-white/10"
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
             </div>
             <div className="p-5 rounded-2xl border border-white/5 bg-white/5">
               <div className="flex items-center gap-2 mb-2">
                 <Sparkles className="w-4 h-4 text-cyan-400" />
                 <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">
-                  Motor IA
+                  API Groq (Desktop)
                 </span>
               </div>
-              <p className="text-sm text-gray-300">Whisper + Llama 3.3 70B</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="password"
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder="gsk_..."
+                  className="w-full rounded-lg bg-black/30 border border-white/10 px-3 py-2 text-xs text-gray-200 placeholder:text-gray-500"
+                />
+                <button
+                  onClick={saveApiKey}
+                  disabled={isSavingApiKey}
+                  className="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 transition-all disabled:opacity-50"
+                  title="Guardar API key"
+                >
+                  <Save className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-2">
+                Se guarda localmente para transcribir en la app de escritorio.
+              </p>
             </div>
           </div>
 

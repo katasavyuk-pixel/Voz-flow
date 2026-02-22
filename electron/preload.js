@@ -13,4 +13,6 @@ contextBridge.exposeInMainWorld("electron", {
     ipcRenderer.invoke("transcribe-audio", audioBuffer),
   getShortcut: () => ipcRenderer.invoke("get-shortcut"),
   setShortcut: (shortcut) => ipcRenderer.invoke("set-shortcut", shortcut),
+  getApiKey: () => ipcRenderer.invoke("get-api-key"),
+  setApiKey: (apiKey) => ipcRenderer.invoke("set-api-key", apiKey),
 });
