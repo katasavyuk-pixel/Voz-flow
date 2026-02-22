@@ -18,6 +18,8 @@ let indicatorWindow;
 let tray = null;
 let activeShortcut = null;
 let lastTargetAppBundleId = null;
+let lastTargetAppName = null;
+let shortcutRecordingState = false;
 app.isQuitting = false;
 const defaultShortcuts = [
   "CommandOrControl+Alt+R",
@@ -167,6 +169,34 @@ function captureFrontmostAppBundleId() {
   }
 }
 
+function captureFrontmostAppName() {
+  if (process.platform !== "darwin") return null;
+
+  try {
+    const out = execSync(
+      "osascript -e 'tell application \"System Events\" to get name of first application process whose frontmost is true'",
+      { encoding: "utf8" },
+    )
+      .trim()
+      .replace(/\r?\n/g, "");
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+function setIndicatorVisible(isRecording) {
+  if (!indicatorWindow || indicatorWindow.isDestroyed()) return;
+  if (isRecording) {
+    const { width } = screen.getPrimaryDisplay().workAreaSize;
+    indicatorWindow.setPosition(Math.round(width / 2 - 160), 40);
+    indicatorWindow.setAlwaysOnTop(true, "screen-saver");
+    indicatorWindow.showInactive();
+  } else {
+    indicatorWindow.hide();
+  }
+}
+
 function updateTrayTooltip() {
   if (!tray) return;
   const shortcutHint = activeShortcut ? ` (${activeShortcut})` : "";
@@ -191,11 +221,16 @@ function registerRecordingShortcut(preferredShortcut, allowFallback = true) {
     const ok = globalShortcut.register(shortcut, () => {
       if (process.platform === "darwin") {
         const focusedBundleId = captureFrontmostAppBundleId();
+        const focusedAppName = captureFrontmostAppName();
         const selfBundleId = getSelfBundleId();
         if (focusedBundleId && focusedBundleId !== selfBundleId) {
           lastTargetAppBundleId = focusedBundleId;
+          lastTargetAppName = focusedAppName;
         }
       }
+
+      shortcutRecordingState = !shortcutRecordingState;
+      setIndicatorVisible(shortcutRecordingState);
 
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("toggle-recording");
@@ -490,17 +525,8 @@ ipcMain.handle("set-api-key", (event, rawApiKey) => {
 });
 
 ipcMain.on("recording-state", (event, isRecording) => {
-  if (indicatorWindow) {
-    if (isRecording) {
-      const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-      // Posicionamiento inteligente: Arriba al centro
-      indicatorWindow.setPosition(Math.round(width / 2 - 160), 40);
-      indicatorWindow.setAlwaysOnTop(true, "screen-saver");
-      indicatorWindow.showInactive();
-    } else {
-      indicatorWindow.hide();
-    }
-  }
+  shortcutRecordingState = Boolean(isRecording);
+  setIndicatorVisible(shortcutRecordingState);
 });
 
 ipcMain.on("type-text", (event, text) => {
@@ -516,22 +542,46 @@ ipcMain.on("type-text", (event, text) => {
     });
   } else if (process.platform === "darwin") {
     const escapedText = text.replace(/"/g, '\\"').replace(/'/g, "'\\''");
+    const escapedName = (lastTargetAppName || "").replace(/"/g, '\\"').trim();
     const escapedBundle = (lastTargetAppBundleId || "")
       .replace(/"/g, '\\"')
       .trim();
+    const activateByNameScript = escapedName
+      ? `try
+                tell application "System Events"
+                    if exists process "${escapedName}" then
+                        set frontmost of process "${escapedName}" to true
+                    end if
+                end tell
+            end try`
+      : "";
     const activateTargetScript = escapedBundle
       ? `try
                 tell application id "${escapedBundle}" to activate
-            end try
-            delay 0.08`
+            end try`
       : "";
 
     const appleScript = `
+            set previousClipboard to ""
+            try
+                set previousClipboard to the clipboard
+            end try
+
             set the clipboard to "${escapedText}"
-            ${activateTargetScript}
-            tell application "System Events"
-                keystroke "v" using {command down}
-            end tell
+
+            repeat 3 times
+                ${activateByNameScript}
+                ${activateTargetScript}
+                delay 0.1
+                tell application "System Events"
+                    keystroke "v" using {command down}
+                end tell
+                delay 0.08
+            end repeat
+
+            try
+                set the clipboard to previousClipboard
+            end try
         `;
 
     exec(`osascript -e ${JSON.stringify(appleScript)}`, (error) => {
