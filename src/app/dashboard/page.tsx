@@ -11,10 +11,40 @@ import {
   Keyboard,
   History,
   Save,
+  ShieldAlert,
+  RefreshCw,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import Link from "next/link";
+
+type FlowSnippet = {
+  trigger: string;
+  output: string;
+};
+
+function parseDictionaryInput(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function parseSnippetsInput(value: string): FlowSnippet[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.includes("→") ? "→" : "->";
+      const [trigger, output] = line
+        .split(separator)
+        .map((chunk) => chunk?.trim());
+      if (!trigger || !output) return null;
+      return { trigger, output };
+    })
+    .filter((item): item is FlowSnippet => item !== null);
+}
 
 export default function DashboardPage() {
   const [isRecording, setIsRecording] = useState(false);
@@ -26,8 +56,20 @@ export default function DashboardPage() {
   const [isSavingShortcut, setIsSavingShortcut] = useState(false);
   const [isCapturingShortcut, setIsCapturingShortcut] = useState(false);
   const [shortcutSavedFlash, setShortcutSavedFlash] = useState(false);
+  const [shortcutRegistered, setShortcutRegistered] = useState<boolean | null>(
+    null,
+  );
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [isSavingApiKey, setIsSavingApiKey] = useState(false);
+  const [permissionStatus, setPermissionStatus] = useState<{
+    accessibility: boolean;
+    automation: boolean;
+    message: string;
+  } | null>(null);
+  const [isCheckingPermissions, setIsCheckingPermissions] = useState(false);
+  const [isRunningPasteTest, setIsRunningPasteTest] = useState(false);
+  const [dictionaryInput, setDictionaryInput] = useState("");
+  const [snippetsInput, setSnippetsInput] = useState("");
   const [history, setHistory] = useState<
     Array<{ original: string; refined: string; date: Date }>
   >([]);
@@ -48,10 +90,27 @@ export default function DashboardPage() {
         setActiveShortcut(shortcut);
         setShortcutInput(shortcut);
 
+        if ((window as any).electron?.getShortcutDiagnostics) {
+          const diag = await (window as any).electron.getShortcutDiagnostics();
+          if (diag?.activeShortcut) {
+            setActiveShortcut(diag.activeShortcut);
+            setShortcutInput(diag.activeShortcut);
+          }
+          setShortcutRegistered(Boolean(diag?.registered));
+        }
+
         if ((window as any).electron?.getApiKey) {
           const currentApiKey = await (window as any).electron.getApiKey();
           if (currentApiKey) setApiKeyInput(currentApiKey);
         }
+
+        const storedDictionary = localStorage.getItem(
+          "flow-personal-dictionary",
+        );
+        if (storedDictionary) setDictionaryInput(storedDictionary);
+
+        const storedSnippets = localStorage.getItem("flow-snippets");
+        if (storedSnippets) setSnippetsInput(storedSnippets);
       } catch {
         setActiveShortcut("-");
       }
@@ -60,41 +119,129 @@ export default function DashboardPage() {
     loadShortcut();
   }, []);
 
-  const processAudio = useCallback(async (audioBlob: Blob) => {
-    setIsProcessing(true);
+  const checkMacPermissions = useCallback(async () => {
+    if (!(window as any).electron?.checkMacPermissions) return;
+    setIsCheckingPermissions(true);
     try {
-      let data;
-      if ((window as any).electron?.transcribeAudio) {
-        const arrayBuffer = await audioBlob.arrayBuffer();
-        data = await (window as any).electron.transcribeAudio(arrayBuffer);
-      } else {
-        const formData = new FormData();
-        formData.append("file", audioBlob, "audio.webm");
-        const response = await fetch("/api/transcribe", {
-          method: "POST",
-          body: formData,
-        });
-        if (!response.ok) throw new Error("Error en transcripción");
-        data = await response.json();
-      }
-
-      setRefinedText(data.refined);
-      setHistory((prev) => [
-        { original: data.original, refined: data.refined, date: new Date() },
-        ...prev.slice(0, 9),
-      ]);
-      navigator.clipboard.writeText(data.refined);
-      if ((window as any).electron)
-        (window as any).electron.typeText(data.refined);
-      setCopied(true);
-      toast.success("Texto copiado al portapapeles");
-      setTimeout(() => setCopied(false), 2000);
-    } catch (error: any) {
-      toast.error(error.message || "Error al procesar");
+      const status = await (window as any).electron.checkMacPermissions();
+      setPermissionStatus(status);
+    } catch {
+      setPermissionStatus(null);
     } finally {
-      setIsProcessing(false);
+      setIsCheckingPermissions(false);
     }
   }, []);
+
+  useEffect(() => {
+    void checkMacPermissions();
+  }, [checkMacPermissions]);
+
+  const runPasteTest = useCallback(async () => {
+    if (!(window as any).electron?.schedulePasteTest) {
+      toast.info("Esta prueba solo aplica en la app de escritorio");
+      return;
+    }
+
+    setIsRunningPasteTest(true);
+    try {
+      const result = await (window as any).electron.schedulePasteTest(3000);
+      if (!result?.ok) {
+        toast.error("No se pudo iniciar la prueba de pegado");
+        return;
+      }
+
+      toast.info(
+        "Prueba de pegado iniciada. Cambia al chat en 3 segundos para validar.",
+      );
+    } catch {
+      toast.error("No se pudo iniciar la prueba de pegado");
+    } finally {
+      setTimeout(() => setIsRunningPasteTest(false), 1200);
+    }
+  }, []);
+
+  const copyToClipboardSafely = useCallback(async (text: string) => {
+    if (!text) return false;
+    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+      return false;
+    }
+    if (typeof document !== "undefined" && !document.hasFocus()) {
+      return false;
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const processAudio = useCallback(
+    async (audioBlob: Blob) => {
+      setIsProcessing(true);
+      if ((window as any).electron?.setIndicatorState) {
+        (window as any).electron.setIndicatorState("processing");
+      }
+      try {
+        let data;
+        const flowConfig = {
+          personalDictionary: parseDictionaryInput(dictionaryInput),
+          snippets: parseSnippetsInput(snippetsInput),
+        };
+
+        if ((window as any).electron?.transcribeAudio) {
+          const arrayBuffer = await audioBlob.arrayBuffer();
+          data = await (window as any).electron.transcribeAudio(
+            arrayBuffer,
+            flowConfig,
+          );
+        } else {
+          const formData = new FormData();
+          formData.append("file", audioBlob, "audio.webm");
+          formData.append("flowConfig", JSON.stringify(flowConfig));
+          const response = await fetch("/api/transcribe", {
+            method: "POST",
+            body: formData,
+          });
+          if (!response.ok) throw new Error("Error en transcripción");
+          data = await response.json();
+        }
+
+        setRefinedText(data.refined);
+        setHistory((prev) => [
+          { original: data.original, refined: data.refined, date: new Date() },
+          ...prev.slice(0, 9),
+        ]);
+        const copiedToClipboard = await copyToClipboardSafely(data.refined);
+        if ((window as any).electron)
+          (window as any).electron.typeText(data.refined);
+        if (copiedToClipboard) {
+          setCopied(true);
+          toast.success("Texto copiado al portapapeles");
+          setTimeout(() => setCopied(false), 2000);
+        } else {
+          toast.success("Texto listo");
+        }
+      } catch (error: any) {
+        toast.error(error.message || "Error al procesar");
+      } finally {
+        setIsProcessing(false);
+        if ((window as any).electron?.setIndicatorState) {
+          (window as any).electron.setIndicatorState("off");
+        }
+      }
+    },
+    [copyToClipboardSafely, dictionaryInput, snippetsInput],
+  );
+
+  useEffect(() => {
+    localStorage.setItem("flow-personal-dictionary", dictionaryInput);
+  }, [dictionaryInput]);
+
+  useEffect(() => {
+    localStorage.setItem("flow-snippets", snippetsInput);
+  }, [snippetsInput]);
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && isRecordingRef.current) {
@@ -175,11 +322,13 @@ export default function DashboardPage() {
       }
       setActiveShortcut(result.shortcut);
       setShortcutInput(result.shortcut);
+      setShortcutRegistered(true);
       setShortcutSavedFlash(true);
       setTimeout(() => setShortcutSavedFlash(false), 1800);
       toast.success(`Atajo guardado: ${result.shortcut}`);
     } catch {
       toast.error("No se pudo guardar el atajo");
+      setShortcutRegistered(false);
     } finally {
       setIsSavingShortcut(false);
     }
@@ -278,15 +427,86 @@ export default function DashboardPage() {
               <p className="text-xs text-gray-500">Español & English</p>
             </div>
           </Link>
-          <Link
-            href="/"
+          <button
+            onClick={() => {
+              if ((window as any).electron) {
+                // En Electron, volver a la raíz cargando el archivo index.html directamente
+                // o regresando mediante el sistema de archivos si es necesario.
+                // Para export estático, a veces '/' no mapea bien a './index.html'
+                window.location.href = (window as any).location.origin + "/index.html";
+              } else {
+                window.location.href = "/";
+              }
+            }}
             className="flex items-center gap-2 text-sm font-medium text-gray-400 hover:text-white transition-colors"
           >
             <ArrowLeft className="w-4 h-4" /> Inicio
-          </Link>
+          </button>
         </header>
 
         <main className="flex flex-col items-center">
+          {permissionStatus &&
+            (!permissionStatus.accessibility ||
+              !permissionStatus.automation) && (
+              <div className="w-full mb-6 rounded-2xl border border-amber-400/30 bg-amber-400/10 p-4 text-amber-100">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold flex items-center gap-2">
+                      <ShieldAlert className="w-4 h-4" />
+                      Faltan permisos del sistema
+                    </p>
+                    <p className="text-xs mt-1 text-amber-200/90">
+                      Sin estos permisos no puede pegar en WhatsApp, ChatGPT o
+                      cualquier chat externo.
+                    </p>
+                    <p className="text-xs mt-1 text-amber-200/80">
+                      Estado: {permissionStatus.message}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => void checkMacPermissions()}
+                    disabled={isCheckingPermissions}
+                    className="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-xs disabled:opacity-50"
+                  >
+                    <RefreshCw
+                      className={`w-4 h-4 ${isCheckingPermissions ? "animate-spin" : ""}`}
+                    />
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  <button
+                    onClick={() =>
+                      (window as any).electron?.openMacPrivacyPane?.(
+                        "accessibility",
+                      )
+                    }
+                    className="text-xs px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20"
+                  >
+                    Abrir Accesibilidad
+                  </button>
+                  <button
+                    onClick={() =>
+                      (window as any).electron?.openMacPrivacyPane?.(
+                        "automation",
+                      )
+                    }
+                    className="text-xs px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20"
+                  >
+                    Abrir Automatizacion
+                  </button>
+                  <button
+                    onClick={() => void runPasteTest()}
+                    disabled={isRunningPasteTest}
+                    className="text-xs px-3 py-2 rounded-lg bg-emerald-500/20 border border-emerald-400/40 hover:bg-emerald-500/30 disabled:opacity-50"
+                  >
+                    {isRunningPasteTest
+                      ? "Probando..."
+                      : "Probar pegado en chat"}
+                  </button>
+                </div>
+              </div>
+            )}
+
           <div className="text-center mb-8 md:mb-10">
             <h2 className="text-3xl md:text-4xl font-black mb-3">
               ¿Qué quieres decir?
@@ -315,11 +535,10 @@ export default function DashboardPage() {
                 <button
                   onClick={toggleAction}
                   disabled={isProcessing}
-                  className={`relative z-10 w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300 ${
-                    isRecording
-                      ? "bg-red-500 shadow-[0_0_40px_rgba(239,68,68,0.5)]"
-                      : "bg-gradient-to-br from-purple-600 via-fuchsia-500 to-cyan-500 hover:scale-105 active:scale-95 shadow-xl shadow-purple-500/20"
-                  }`}
+                  className={`relative z-10 w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300 ${isRecording
+                    ? "bg-red-500 shadow-[0_0_40px_rgba(239,68,68,0.5)]"
+                    : "bg-gradient-to-br from-purple-600 via-fuchsia-500 to-cyan-500 hover:scale-105 active:scale-95 shadow-xl shadow-purple-500/20"
+                    }`}
                 >
                   {isProcessing ? (
                     <Sparkles className="w-8 h-8 animate-pulse" />
@@ -364,8 +583,15 @@ export default function DashboardPage() {
               {refinedText && !isRecording && !isProcessing && (
                 <div className="flex items-center gap-3">
                   <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(refinedText);
+                    onClick={async () => {
+                      const copiedToClipboard =
+                        await copyToClipboardSafely(refinedText);
+                      if (!copiedToClipboard) {
+                        toast.error(
+                          "No se pudo copiar. Enfoca la app y reintenta.",
+                        );
+                        return;
+                      }
                       setCopied(true);
                       setTimeout(() => setCopied(false), 2000);
                       toast.success("Copiado");
@@ -392,7 +618,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="w-full grid sm:grid-cols-2 gap-4 opacity-80">
+          <div className="w-full grid lg:grid-cols-3 gap-4 opacity-80">
             <div className="p-5 rounded-2xl border border-white/5 bg-white/5">
               <div className="flex items-center gap-2 mb-2">
                 <Keyboard className="w-4 h-4 text-purple-400" />
@@ -403,6 +629,11 @@ export default function DashboardPage() {
               <p className="text-sm text-gray-300 font-mono mb-2">
                 {activeShortcut}
               </p>
+              {shortcutRegistered === false && (
+                <p className="text-[11px] text-amber-300 mb-2">
+                  Atajo no registrado. Prueba otro preset.
+                </p>
+              )}
               {shortcutSavedFlash && (
                 <p className="text-[11px] text-emerald-400 mb-2">
                   Atajo activo
@@ -417,11 +648,10 @@ export default function DashboardPage() {
                 />
                 <button
                   onClick={() => setIsCapturingShortcut((prev) => !prev)}
-                  className={`px-3 py-2 rounded-lg transition-all ${
-                    isCapturingShortcut
-                      ? "bg-cyan-500/20 border border-cyan-400/40"
-                      : "bg-white/10 hover:bg-white/20"
-                  }`}
+                  className={`px-3 py-2 rounded-lg transition-all ${isCapturingShortcut
+                    ? "bg-cyan-500/20 border border-cyan-400/40"
+                    : "bg-white/10 hover:bg-white/20"
+                    }`}
                   title="Capturar atajo"
                 >
                   {isCapturingShortcut ? "Teclea..." : "Capturar"}
@@ -433,6 +663,15 @@ export default function DashboardPage() {
                   title="Guardar atajo"
                 >
                   <Save className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() =>
+                    (window as any).electron?.forceToggleRecording?.()
+                  }
+                  className="px-3 py-2 rounded-lg bg-cyan-500/20 border border-cyan-400/40 hover:bg-cyan-500/30"
+                  title="Probar grabacion sin atajo"
+                >
+                  Test
                 </button>
               </div>
               <div className="flex flex-wrap gap-2 mt-2">
@@ -478,6 +717,34 @@ export default function DashboardPage() {
               <p className="text-xs text-gray-500 mt-2">
                 Se guarda localmente para transcribir en la app de escritorio.
               </p>
+            </div>
+            <div className="p-5 rounded-2xl border border-white/5 bg-white/5">
+              <div className="flex items-center gap-2 mb-2">
+                <Sparkles className="w-4 h-4 text-fuchsia-400" />
+                <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">
+                  Flow Personalizado
+                </span>
+              </div>
+              <label className="block text-[11px] text-gray-500 mb-1">
+                Diccionario personal (1 termino por linea)
+              </label>
+              <textarea
+                value={dictionaryInput}
+                onChange={(e) => setDictionaryInput(e.target.value)}
+                placeholder={"Cheyene\nViktor\nSaaS\nGTM"}
+                className="w-full h-24 rounded-lg bg-black/30 border border-white/10 px-3 py-2 text-xs text-gray-200 placeholder:text-gray-500 resize-none"
+              />
+              <label className="block text-[11px] text-gray-500 mt-3 mb-1">
+                Snippets (trigger -&gt; texto completo)
+              </label>
+              <textarea
+                value={snippetsInput}
+                onChange={(e) => setSnippetsInput(e.target.value)}
+                placeholder={
+                  "mi calendario -> Podes agendar una llamada de 30 minutos aqui: calendly.com/tuusuario"
+                }
+                className="w-full h-24 rounded-lg bg-black/30 border border-white/10 px-3 py-2 text-xs text-gray-200 placeholder:text-gray-500 resize-none"
+              />
             </div>
           </div>
 

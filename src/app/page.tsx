@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Mic,
   Square,
@@ -60,6 +60,23 @@ export default function LandingPage() {
       return () => clearTimeout(timeout);
     }
   }, [showResult]);
+
+  const copyToClipboardSafely = useCallback(async (text: string) => {
+    if (!text) return false;
+    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+      return false;
+    }
+    if (typeof document !== "undefined" && !document.hasFocus()) {
+      return false;
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
 
   const toggleAction = () => {
     if (isRecording) {
@@ -124,10 +141,14 @@ export default function LandingPage() {
 
       const data = await response.json();
       setRefinedText(data.refined);
-      navigator.clipboard.writeText(data.refined);
-      setCopied(true);
-      toast.success("Texto copiado al portapapeles");
-      setTimeout(() => setCopied(false), 2000);
+      const copiedToClipboard = await copyToClipboardSafely(data.refined);
+      if (copiedToClipboard) {
+        setCopied(true);
+        toast.success("Texto copiado al portapapeles");
+        setTimeout(() => setCopied(false), 2000);
+      } else {
+        toast.success("Texto listo");
+      }
     } catch (error: any) {
       toast.error("Error: " + error.message);
     } finally {
@@ -281,8 +302,15 @@ export default function LandingPage() {
 
               {refinedText && !isRecording && !isProcessing && (
                 <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(refinedText);
+                  onClick={async () => {
+                    const copiedToClipboard =
+                      await copyToClipboardSafely(refinedText);
+                    if (!copiedToClipboard) {
+                      toast.error(
+                        "No se pudo copiar. Enfoca la app y reintenta.",
+                      );
+                      return;
+                    }
                     setCopied(true);
                     setTimeout(() => setCopied(false), 2000);
                   }}

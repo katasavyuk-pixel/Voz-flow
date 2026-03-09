@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Mic, Square, Copy, RefreshCw, Check, Sparkles } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
@@ -13,30 +13,122 @@ export default function VoiceRecorder() {
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-
-  const toggleAction = () => {
-    if (isRecording) {
-      stopRecording();
-    } else {
-      startRecording();
-    }
-  };
+  const isRecordingRef = useRef(false);
 
   useEffect(() => {
-    // Integración con Electron para atajos globales
-    if (typeof window !== "undefined" && (window as any).electron) {
-      (window as any).electron.onToggleRecording(() => {
-        console.log("Recibido toggle-recording desde Electron");
-        if (isRecording) {
-          stopRecording();
-        } else {
-          startRecording();
-        }
-      });
-    }
-  }, [isRecording, startRecording, stopRecording]);
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
 
-  async function startRecording() {
+  const copyToClipboardSafely = useCallback(async (text: string) => {
+    if (!text) return false;
+    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+      return false;
+    }
+    if (typeof document !== "undefined" && !document.hasFocus()) {
+      return false;
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const sendToGroq = useCallback(
+    async (audioBlob: Blob) => {
+      setIsProcessing(true);
+      if ((window as any).electron?.setIndicatorState) {
+        (window as any).electron.setIndicatorState("processing");
+      }
+      try {
+        let data;
+
+        // Si estamos en Electron, usar el puente nativo para evitar depender de API routes
+        if (
+          (window as any).electron &&
+          (window as any).electron.transcribeAudio
+        ) {
+          const arrayBuffer = await audioBlob.arrayBuffer();
+          data = await (window as any).electron.transcribeAudio(arrayBuffer);
+        } else {
+          // Fallback para web
+          const formData = new FormData();
+          formData.append("file", audioBlob, "audio.webm");
+
+          const response = await fetch("/api/transcribe", {
+            method: "POST",
+            body: formData,
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(
+              errorData.error || "Error en el servidor de transcripción",
+            );
+          }
+          data = await response.json();
+        }
+
+        if (!data || !data.refined) {
+          throw new Error("No se recibió texto refinado");
+        }
+
+        setRefinedText(data.refined);
+
+        // Guardar en la base de datos (Supabase)
+        try {
+          // En Electron, podemos usar el cliente de Supabase directamente si está configurado,
+          // Pero para mantener simplicidad usamos el endpoint si está disponible
+          // o lo manejamos via IPC si fuera necesario. Por ahora, seguimos con el fetch
+          // ya que Supabase es una URL externa.
+          const saveResponse = await fetch("/api/transcriptions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              original_text: data.original,
+              refined_text: data.refined,
+            }),
+          });
+
+          if (saveResponse.ok) {
+            console.log("Transcripción guardada en la base de datos");
+          }
+        } catch (saveError) {
+          console.error("Error al persistir transcripción:", saveError);
+        }
+
+        // Auto-copy & Universal Type
+        const copiedToClipboard = await copyToClipboardSafely(data.refined);
+
+        if ((window as any).electron) {
+          (window as any).electron.typeText(data.refined);
+        }
+
+        if (copiedToClipboard) {
+          setCopied(true);
+          toast.success("¡Texto refinado y enviado!");
+          setTimeout(() => setCopied(false), 2000);
+        } else {
+          toast.success("¡Texto refinado y enviado!");
+        }
+      } catch (error: any) {
+        console.error("Error al procesar audio:", error);
+        toast.error("Error: " + error.message);
+      } finally {
+        setIsProcessing(false);
+        if ((window as any).electron?.setIndicatorState) {
+          (window as any).electron.setIndicatorState("off");
+        }
+      }
+    },
+    [copyToClipboardSafely],
+  );
+
+  const startRecording = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
@@ -55,6 +147,7 @@ export default function VoiceRecorder() {
       };
 
       mediaRecorder.start();
+      isRecordingRef.current = true;
       setIsRecording(true);
       if ((window as any).electron) {
         (window as any).electron.setRecordingState(true);
@@ -67,99 +160,40 @@ export default function VoiceRecorder() {
         "No se pudo acceder al micrófono. Por favor, revisa tus permisos.",
       );
     }
-  }
+  }, [sendToGroq]);
 
-  function stopRecording() {
-    if (mediaRecorderRef.current && isRecording) {
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && isRecordingRef.current) {
       mediaRecorderRef.current.stop();
       mediaRecorderRef.current.stream
         .getTracks()
         .forEach((track) => track.stop());
+      isRecordingRef.current = false;
       setIsRecording(false);
       if ((window as any).electron) {
         (window as any).electron.setRecordingState(false);
       }
     }
-  }
+  }, []);
 
-  const sendToGroq = async (audioBlob: Blob) => {
-    setIsProcessing(true);
-    try {
-      let data;
-
-      // Si estamos en Electron, usar el puente nativo para evitar depender de API routes
-      if (
-        (window as any).electron &&
-        (window as any).electron.transcribeAudio
-      ) {
-        const arrayBuffer = await audioBlob.arrayBuffer();
-        data = await (window as any).electron.transcribeAudio(arrayBuffer);
-      } else {
-        // Fallback para web
-        const formData = new FormData();
-        formData.append("file", audioBlob, "audio.webm");
-
-        const response = await fetch("/api/transcribe", {
-          method: "POST",
-          body: formData,
-        });
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(
-            errorData.error || "Error en el servidor de transcripción",
-          );
-        }
-        data = await response.json();
-      }
-
-      if (!data || !data.refined) {
-        throw new Error("No se recibió texto refinado");
-      }
-
-      setRefinedText(data.refined);
-
-      // Guardar en la base de datos (Supabase)
-      try {
-        // En Electron, podemos usar el cliente de Supabase directamente si está configurado,
-        // Pero para mantener simplicidad usamos el endpoint si está disponible
-        // o lo manejamos via IPC si fuera necesario. Por ahora, seguimos con el fetch
-        // ya que Supabase es una URL externa.
-        const saveResponse = await fetch("/api/transcriptions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            original_text: data.original,
-            refined_text: data.refined,
-          }),
-        });
-
-        if (saveResponse.ok) {
-          console.log("Transcripción guardada en la base de datos");
-        }
-      } catch (saveError) {
-        console.error("Error al persistir transcripción:", saveError);
-      }
-
-      // Auto-copy & Universal Type
-      navigator.clipboard.writeText(data.refined);
-
-      if ((window as any).electron) {
-        (window as any).electron.typeText(data.refined);
-      }
-
-      setCopied(true);
-      toast.success("¡Texto refinado y enviado!");
-      setTimeout(() => setCopied(false), 2000);
-    } catch (error: any) {
-      console.error("Error al procesar audio:", error);
-      toast.error("Error: " + error.message);
-    } finally {
-      setIsProcessing(false);
+  const toggleAction = useCallback(() => {
+    if (isRecordingRef.current) {
+      stopRecording();
+    } else {
+      void startRecording();
     }
-  };
+  }, [startRecording, stopRecording]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).electron) return;
+    const unsubscribe = (window as any).electron.onToggleRecording(() => {
+      toggleAction();
+    });
+
+    return () => {
+      if (typeof unsubscribe === "function") unsubscribe();
+    };
+  }, [toggleAction]);
 
   return (
     <div className="w-full max-w-3xl mx-auto p-8 rounded-[40px] bg-[#111112] border border-white/10 shadow-3xl shadow-purple-500/5">
@@ -179,11 +213,10 @@ export default function VoiceRecorder() {
 
           <button
             onClick={toggleAction}
-            className={`relative z-10 w-24 h-24 rounded-full flex items-center justify-center transition-all duration-500 ${
-              isRecording
+            className={`relative z-10 w-24 h-24 rounded-full flex items-center justify-center transition-all duration-500 ${isRecording
                 ? "bg-red-500 shadow-[0_0_30px_rgba(239,68,68,0.5)]"
                 : "bg-gradient-to-br from-purple-600 to-cyan-500 hover:scale-110 active:scale-95 shadow-xl"
-            }`}
+              }`}
           >
             {isRecording ? (
               <Square className="w-8 h-8 fill-white" />
@@ -244,8 +277,13 @@ export default function VoiceRecorder() {
         {refinedText && !isRecording && !isProcessing && (
           <div className="flex items-center gap-3">
             <button
-              onClick={() => {
-                navigator.clipboard.writeText(refinedText);
+              onClick={async () => {
+                const copiedToClipboard =
+                  await copyToClipboardSafely(refinedText);
+                if (!copiedToClipboard) {
+                  toast.error("No se pudo copiar. Enfoca la app y reintenta.");
+                  return;
+                }
                 setCopied(true);
                 setTimeout(() => setCopied(false), 2000);
                 toast.success("Copiado al portapapeles");

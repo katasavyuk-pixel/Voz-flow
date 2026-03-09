@@ -7,6 +7,7 @@ const {
   Tray,
   Menu,
   nativeImage,
+  shell,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -25,7 +26,91 @@ const defaultShortcuts = [
   "CommandOrControl+Alt+R",
   "CommandOrControl+Alt+D",
   "CommandOrControl+Alt+V",
+  "CommandOrControl+Alt+Shift+R",
+  "CommandOrControl+Alt+Shift+D",
+  "CommandOrControl+Alt+Shift+V",
+  "CommandOrControl+Alt+9",
+  "CommandOrControl+Alt+0",
 ];
+
+function sanitizeFlowConfig(rawConfig) {
+  if (!rawConfig || typeof rawConfig !== "object") {
+    return { personalDictionary: [], snippets: [] };
+  }
+
+  const personalDictionary = Array.isArray(rawConfig.personalDictionary)
+    ? rawConfig.personalDictionary
+      .map((entry) => String(entry).trim())
+      .filter(Boolean)
+    : [];
+
+  const snippets = Array.isArray(rawConfig.snippets)
+    ? rawConfig.snippets
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const trigger = String(item.trigger || "").trim();
+        const output = String(item.output || "").trim();
+        if (!trigger || !output) return null;
+        return { trigger, output };
+      })
+      .filter((item) => item !== null)
+    : [];
+
+  return { personalDictionary, snippets };
+}
+
+function buildFlowSystemPrompt(config) {
+  const dictionaryBlock = config.personalDictionary.length
+    ? `\n\nDICCIONARIO PERSONAL (obligatorio):\n${config.personalDictionary
+      .map((term) => `- ${term}`)
+      .join("\n")}`
+    : "";
+
+  const snippetsBlock = config.snippets.length
+    ? `\n\nSNIPPETS (reemplazo obligatorio cuando detectes el trigger):\n${config.snippets
+      .map((snippet) => `- ${snippet.trigger} -> ${snippet.output}`)
+      .join("\n")}`
+    : "";
+
+  return `Eres un motor de transcripcion y edicion de voz de alto rendimiento llamado "Flow".
+Tu unica funcion es transformar texto hablado crudo en texto escrito limpio, pulido y perfectamente formateado, manteniendo al 100% el sentido e intencion original.
+
+NO eres un chatbot. NO respondes preguntas. NO das opiniones. NO anades informacion. SOLO editas.
+
+REGLAS OBLIGATORIAS:
+1) Elimina muletillas y relleno (eh, um, mmm, bueno, o sea, tipo, es que, digamos, como que, etc.).
+2) Corrige ortografia y gramatica sin cambiar significado.
+3) Reestructura frases confusas para claridad, sin alterar intencion.
+4) Formatea con puntuacion, parrafos y estructura natural.
+5) Mantiene la personalidad y registro del hablante (formal/informal).
+6) NO inventes informacion y NO cambies el sentido.
+7) Si el texto es corto o ambiguo, devuelve igual o con correcciones minimas.
+
+TONO/CONTEXTO:
+Detecta automaticamente el contexto (email, chat, Slack, nota personal, tecnico, red social, legal, atencion al cliente, creativo, academico) y ajusta tono en consecuencia.
+Si no es claro, usa neutral-profesional.
+
+MULTILINGUE:
+Detecta idioma automaticamente y responde en el mismo idioma.
+Si hay cambio de idioma dentro del dictado, conserva cada seccion en su idioma.
+
+COMANDOS DE VOZ ESPECIALES (si aparecen en el dictado, ejecutalos):
+- "borra eso" / "eliminar eso": elimina la ultima oracion o fragmento previo.
+- "en negrita [texto]": aplica negrita solo a ese fragmento.
+- "hace una lista con...": convierte lo siguiente en lista.
+- "nuevo parrafo": inserta salto de parrafo.
+- "tono mas formal": rehace con tono mas formal.
+- "tono mas casual": rehace con tono mas casual.
+- "resumi esto": entrega un resumen conciso del dictado.
+- "agrega un asunto": genera una linea de asunto si corresponde a email.
+- "ponelo en modo email": formatea como email profesional con saludo, cuerpo y cierre.
+- "puntos clave": extrae y lista los puntos principales.
+${dictionaryBlock}${snippetsBlock}
+
+SALIDA:
+- Devuelve SOLO el texto final editado listo para usar.
+- Nunca incluyas explicaciones, etiquetas, metadatos ni prefacios.`;
+}
 
 function getSettingsPath() {
   return path.join(app.getPath("userData"), "settings.json");
@@ -145,56 +230,205 @@ function normalizeShortcut(rawShortcut) {
   return { ok: true, shortcut: [...modifiers, key].join("+") };
 }
 
-function getSelfBundleId() {
+// Self bundle ID — resolved once at startup, never blocks the hot path
+let selfBundleId = null;
+
+function initSelfBundleId() {
   try {
-    return app.getBundleID();
-  } catch {
-    return "com.vozflow.app";
+    const bid = app.getBundleID();
+    if (bid) { selfBundleId = bid; return; }
+  } catch { /* ignore */ }
+
+  if (process.platform === "darwin") {
+    try {
+      const out = execSync(
+        `osascript -e 'tell application "System Events" to get bundle identifier of first application process whose unix id is ${process.pid}'`,
+        { encoding: "utf8", timeout: 3000 },
+      ).trim();
+      if (out && out !== "missing value") { selfBundleId = out; return; }
+    } catch { /* ignore */ }
   }
+
+  selfBundleId = "com.vozflow.app";
 }
 
-function captureFrontmostAppBundleId() {
-  if (process.platform !== "darwin") return null;
+// Single osascript call to get both bundle ID and name of frontmost app (fast)
+function captureFrontmostApp() {
+  if (process.platform !== "darwin") return { bundleId: null, appName: null };
 
   try {
     const out = execSync(
-      "osascript -e 'tell application \"System Events\" to get bundle identifier of first application process whose frontmost is true'",
-      { encoding: "utf8" },
-    )
-      .trim()
-      .replace(/\r?\n/g, "");
-    return out || null;
+      `osascript -e 'tell application "System Events" to set fp to first application process whose frontmost is true' -e 'return (bundle identifier of fp) & "|" & (name of fp)'`,
+      { encoding: "utf8", timeout: 1500 },
+    ).trim().replace(/\r?\n/g, "");
+    const [bundleId, appName] = out.split("|");
+    return { bundleId: bundleId || null, appName: appName || null };
   } catch {
-    return null;
+    return { bundleId: null, appName: null };
   }
 }
 
-function captureFrontmostAppName() {
-  if (process.platform !== "darwin") return null;
+function resolveTargetAppForPaste() {
+  // Always use the target saved when shortcut was pressed — no extra execSync here
+  if (lastTargetAppBundleId) {
+    return { bundleId: lastTargetAppBundleId, appName: lastTargetAppName || null };
+  }
+  return { bundleId: null, appName: null };
+}
 
+function pasteTextOnMac(text) {
+  const target = resolveTargetAppForPaste();
+  const targetLabel = target.appName || target.bundleId || "Unknown App";
+  console.log(`[Voz Flow] === PASTE START ===`);
+  console.log(`[Voz Flow] Target: ${targetLabel} (bundle: ${target.bundleId || "N/A"})`);
+  console.log(`[Voz Flow] Text length: ${(text || "").length}`);
+
+  // 1. Set clipboard synchronously via pbcopy
   try {
-    const out = execSync(
-      "osascript -e 'tell application \"System Events\" to get name of first application process whose frontmost is true'",
-      { encoding: "utf8" },
-    )
-      .trim()
-      .replace(/\r?\n/g, "");
-    return out || null;
-  } catch {
-    return null;
+    execSync("pbcopy", { input: text, encoding: "utf8" });
+    console.log("[Voz Flow] Clipboard set OK");
+  } catch (err) {
+    console.error("[Voz Flow] pbcopy FAILED:", err.message);
+    return;
   }
+
+  // 2. Build a SINGLE atomic AppleScript: activate via shell + delay + Cmd+V
+  //    No setTimeout — everything runs inside osascript so nothing can steal focus in between
+  const escapedBundle = String(target.bundleId || "")
+    .replace(/'/g, "'\\''")
+    .trim();
+
+  const activateLine = escapedBundle
+    ? `do shell script "open -b '${escapedBundle}'"
+       delay 0.3`
+    : "delay 0.1";
+
+  const appleScript = `
+    ${activateLine}
+    tell application "System Events" to keystroke "v" using {command down}
+  `;
+
+  console.log("[Voz Flow] Running atomic AppleScript (activate + paste)...");
+  exec(`osascript -e ${JSON.stringify(appleScript)}`, (error, _stdout, stderr) => {
+    if (error) {
+      console.error("[Voz Flow] AppleScript FAILED:", error.message);
+      if (stderr) console.error("[Voz Flow] stderr:", stderr);
+    } else {
+      console.log(`[Voz Flow] Pasted OK into ${targetLabel}`);
+    }
+    console.log("[Voz Flow] === PASTE END ===");
+  });
 }
 
-function setIndicatorVisible(isRecording) {
+function checkMacPermissions() {
+  if (process.platform !== "darwin") {
+    return {
+      accessibility: true,
+      automation: true,
+      message: "ok",
+    };
+  }
+
+  const runProbe = (script) => {
+    try {
+      execSync(`osascript -e ${JSON.stringify(script)}`, { stdio: "pipe" });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const accessibility = runProbe(
+    'tell application "System Events" to get name of first application process whose frontmost is true',
+  );
+  const automation = runProbe(
+    'tell application "System Events" to keystroke ""',
+  );
+
+  let message = "ok";
+  if (!accessibility) message = "Falta permiso de Accesibilidad";
+  else if (!automation) message = "Falta permiso de Automatizacion";
+
+  return { accessibility, automation, message };
+}
+
+function openMacPrivacyPane(section) {
+  if (process.platform !== "darwin") return;
+
+  const pane =
+    section === "automation"
+      ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+      : "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+
+  shell.openExternal(pane);
+}
+
+function updateIndicatorUI(state) {
   if (!indicatorWindow || indicatorWindow.isDestroyed()) return;
-  if (isRecording) {
+
+  const config = {
+    recording: {
+      color: "#ef4444",
+      glow: "rgba(239, 68, 68, 0.7)",
+      text: "Voz Flow Grabando",
+      showWave: true,
+      borderColor: "rgba(239, 68, 68, 0.5)",
+    },
+    processing: {
+      color: "#a855f7",
+      glow: "rgba(168, 85, 247, 0.7)",
+      text: "Groq AI Procesando...",
+      showWave: false,
+      borderColor: "rgba(168, 85, 247, 0.6)",
+    },
+  };
+
+  const current = config[state];
+  if (!current) {
+    indicatorWindow.hide();
+    return;
+  }
+
+  const js = `
+    document.querySelector('.dot').style.background = '${current.color}';
+    document.querySelector('.dot').style.boxShadow = '0 0 15px ${current.glow}';
+    document.querySelector('.text').innerText = '${current.text}';
+    document.querySelector('.wave').style.display = '${current.showWave ? "flex" : "none"}';
+    document.querySelector('.container').style.borderColor = '${current.borderColor}';
+  `;
+
+  indicatorWindow.webContents.executeJavaScript(js);
+
+  if (state === "recording" || state === "processing") {
     const { width } = screen.getPrimaryDisplay().workAreaSize;
     indicatorWindow.setPosition(Math.round(width / 2 - 160), 40);
     indicatorWindow.setAlwaysOnTop(true, "screen-saver");
     indicatorWindow.showInactive();
-  } else {
-    indicatorWindow.hide();
   }
+}
+
+function setIndicatorVisible(isRecording) {
+  updateIndicatorUI(isRecording ? "recording" : "off");
+}
+
+function dispatchToggleRecordingToRenderer() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+
+  const sendToggle = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("toggle-recording");
+    }
+  };
+
+  if (mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.once("did-finish-load", sendToggle);
+    return;
+  }
+
+  sendToggle();
 }
 
 function updateTrayTooltip() {
@@ -219,21 +453,23 @@ function registerRecordingShortcut(preferredShortcut, allowFallback = true) {
 
   for (const shortcut of candidates) {
     const ok = globalShortcut.register(shortcut, () => {
-      if (process.platform === "darwin") {
-        const focusedBundleId = captureFrontmostAppBundleId();
-        const focusedAppName = captureFrontmostAppName();
-        const selfBundleId = getSelfBundleId();
-        if (focusedBundleId && focusedBundleId !== selfBundleId) {
-          lastTargetAppBundleId = focusedBundleId;
-          lastTargetAppName = focusedAppName;
-        }
-      }
-
+      // Toggle recording FIRST (instant feedback), then capture target app
       shortcutRecordingState = !shortcutRecordingState;
       setIndicatorVisible(shortcutRecordingState);
+      dispatchToggleRecordingToRenderer();
 
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("toggle-recording");
+      // Capture target app in background — never blocks UI
+      try {
+        if (process.platform === "darwin") {
+          const focused = captureFrontmostApp();
+          if (focused.bundleId && focused.bundleId !== selfBundleId) {
+            lastTargetAppBundleId = focused.bundleId;
+            lastTargetAppName = focused.appName;
+            console.log(`[Voz Flow] Target: ${focused.appName} (${focused.bundleId})`);
+          }
+        }
+      } catch (err) {
+        console.error("[Voz Flow] Error capturing target (non-fatal):", err.message);
       }
     });
 
@@ -442,6 +678,9 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  initSelfBundleId();
+  console.log(`[Voz Flow] Self bundle ID: ${selfBundleId}`);
+
   if (process.platform === "darwin" && app.dock) {
     try {
       app.dock.setIcon(getDockIconPath());
@@ -485,6 +724,23 @@ ipcMain.handle("get-shortcut", () => {
   );
 });
 
+ipcMain.handle("get-shortcut-diagnostics", () => {
+  return {
+    activeShortcut,
+    registered: Boolean(
+      activeShortcut && globalShortcut.isRegistered(activeShortcut),
+    ),
+    fallbackPool: defaultShortcuts,
+  };
+});
+
+ipcMain.handle("force-toggle-recording", () => {
+  shortcutRecordingState = !shortcutRecordingState;
+  setIndicatorVisible(shortcutRecordingState);
+  dispatchToggleRecordingToRenderer();
+  return { ok: true };
+});
+
 ipcMain.handle("set-shortcut", (event, rawShortcut) => {
   const normalized = normalizeShortcut(rawShortcut);
   if (!normalized.ok) {
@@ -524,6 +780,32 @@ ipcMain.handle("set-api-key", (event, rawApiKey) => {
   return { ok: true };
 });
 
+ipcMain.handle("check-mac-permissions", () => {
+  return checkMacPermissions();
+});
+
+ipcMain.handle("open-mac-privacy-pane", (event, section) => {
+  openMacPrivacyPane(section);
+  return { ok: true };
+});
+
+ipcMain.handle("schedule-paste-test", (event, rawDelayMs) => {
+  const delayMs = Math.max(1000, Math.min(7000, Number(rawDelayMs) || 3000));
+
+  setTimeout(() => {
+    if (process.platform === "darwin") {
+      const focused = captureFrontmostApp();
+      if (focused.bundleId && focused.bundleId !== selfBundleId) {
+        lastTargetAppBundleId = focused.bundleId;
+        lastTargetAppName = focused.appName;
+      }
+      pasteTextOnMac("[Voz Flow] prueba de pegado OK");
+    }
+  }, delayMs);
+
+  return { ok: true, delayMs };
+});
+
 ipcMain.on("recording-state", (event, isRecording) => {
   shortcutRecordingState = Boolean(isRecording);
   setIndicatorVisible(shortcutRecordingState);
@@ -541,108 +823,85 @@ ipcMain.on("type-text", (event, text) => {
       if (error) console.error("Error typing text (Windows):", error);
     });
   } else if (process.platform === "darwin") {
-    const escapedText = text.replace(/"/g, '\\"').replace(/'/g, "'\\''");
-    const escapedName = (lastTargetAppName || "").replace(/"/g, '\\"').trim();
-    const escapedBundle = (lastTargetAppBundleId || "")
-      .replace(/"/g, '\\"')
-      .trim();
-    const activateByNameScript = escapedName
-      ? `try
-                tell application "System Events"
-                    if exists process "${escapedName}" then
-                        set frontmost of process "${escapedName}" to true
-                    end if
-                end tell
-            end try`
-      : "";
-    const activateTargetScript = escapedBundle
-      ? `try
-                tell application id "${escapedBundle}" to activate
-            end try`
-      : "";
-
-    const appleScript = `
-            set previousClipboard to ""
-            try
-                set previousClipboard to the clipboard
-            end try
-
-            set the clipboard to "${escapedText}"
-
-            repeat 3 times
-                ${activateByNameScript}
-                ${activateTargetScript}
-                delay 0.1
-                tell application "System Events"
-                    keystroke "v" using {command down}
-                end tell
-                delay 0.08
-            end repeat
-
-            try
-                set the clipboard to previousClipboard
-            end try
-        `;
-
-    exec(`osascript -e ${JSON.stringify(appleScript)}`, (error) => {
-      if (error) console.error("Error typing text (Mac):", error);
-    });
+    pasteTextOnMac(text);
   }
 });
 
-ipcMain.handle("transcribe-audio", async (event, audioBuffer) => {
-  try {
-    const apiKey = process.env.GROQ_API_KEY || loadSavedApiKey();
-    if (!apiKey) {
-      throw new Error(
-        "Falta GROQ_API_KEY. Abre Dashboard y guarda tu API key de Groq en Configuracion.",
-      );
-    }
+ipcMain.on("set-indicator-state", (event, state) => {
+  updateIndicatorUI(state);
+});
 
-    const Groq = require("groq-sdk");
-    const groq = new Groq({
-      apiKey,
-    });
-
-    // 1. Transcribir con Groq Whisper
-    const tempPath = path.join(app.getPath("temp"), `audio_${Date.now()}.webm`);
-    fs.writeFileSync(tempPath, Buffer.from(audioBuffer));
-
-    const transcription = await groq.audio.transcriptions.create({
-      file: fs.createReadStream(tempPath),
-      model: "whisper-large-v3",
-      response_format: "verbose_json",
-    });
-
-    const originalText = transcription.text;
-
-    // 2. Refinar con Llama 3
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a high-fidelity transcription assistant. Your goal is to convert audio into polished text. RULES: 1. Detect the language (Spanish or English) and respond in the SAME language. 2. Remove filler words (um, uh, eh, am) but keep the speaker's style and personality. 3. Fix grammar and punctuation naturally. 4. Do NOT summarize or paraphrase - keep all the meaning and content. 5. Format into clear, readable text. 6. Output ONLY the cleaned transcription, no explanations.",
-        },
-        {
-          role: "user",
-          content: originalText,
-        },
-      ],
-      model: "llama-3.3-70b-versatile",
-      temperature: 0.1,
-    });
-
+ipcMain.handle(
+  "transcribe-audio",
+  async (event, audioBuffer, rawFlowConfig) => {
     try {
-      fs.unlinkSync(tempPath);
-    } catch (e) {}
+      const apiKey = process.env.GROQ_API_KEY || loadSavedApiKey();
+      if (!apiKey) {
+        throw new Error(
+          "Falta GROQ_API_KEY. Abre Dashboard y guarda tu API key de Groq en Configuracion.",
+        );
+      }
 
-    return {
-      original: originalText,
-      refined: chatCompletion.choices[0]?.message?.content || originalText,
-    };
-  } catch (error) {
-    console.error("Error en transcribe-audio (Electron):", error);
-    throw error;
-  }
-});
+      const Groq = require("groq-sdk");
+      const groq = new Groq({
+        apiKey,
+      });
+
+      // 1. Transcribir con Groq Whisper
+      const tempPath = path.join(
+        app.getPath("temp"),
+        `audio_${Date.now()}.webm`,
+      );
+      fs.writeFileSync(tempPath, Buffer.from(audioBuffer));
+
+      const transcription = await groq.audio.transcriptions.create({
+        file: fs.createReadStream(tempPath),
+        model: "whisper-large-v3",
+        response_format: "verbose_json",
+      });
+
+      const originalText = transcription.text;
+      const flowConfig = sanitizeFlowConfig(rawFlowConfig);
+
+      // 2. Refinar con Llama 3
+      const chatCompletion = await groq.chat.completions.create({
+        messages: [
+          {
+            role: "system",
+            content: buildFlowSystemPrompt(flowConfig),
+          },
+          {
+            role: "user",
+            content: originalText,
+          },
+        ],
+        model: "llama-3.3-70b-versatile",
+        temperature: 0.1,
+      });
+
+      try {
+        fs.unlinkSync(tempPath);
+      } catch (e) { }
+
+      console.log("[Voz Flow] Refinamiento completado. Caracteres:", chatCompletion.choices[0]?.message?.content?.length || 0);
+
+      return {
+        original: originalText,
+        refined: chatCompletion.choices[0]?.message?.content || originalText,
+      };
+    } catch (error) {
+      console.error("[Voz Flow] Error en transcribe-audio (Electron):", error);
+
+      if (error.status === 403 || (error.message && error.message.includes("403"))) {
+        throw new Error(
+          "Error 403 (Acceso Denegado) de Groq. Esto suele ocurrir por:\n" +
+          "1. API Key inválida o caducada.\n" +
+          "2. Tu región está bloqueada por Groq.\n" +
+          "3. Estás usando una VPN o Proxy que Groq está bloqueando.\n\n" +
+          "Por favor, revisa tu conexión y prueba a generar una nueva API Key en console.groq.com."
+        );
+      }
+      throw error;
+    }
+  },
+);
