@@ -22,6 +22,8 @@ type ElectronBridge = {
     audioArrayBuffer: ArrayBuffer,
   ) => Promise<{ original?: string; refined?: string }>;
   typeText?: (text: string) => void;
+  onTypeTextSuccess?: (callback: () => void) => void;
+  onTypeTextError?: (callback: (errorMessage: string) => void) => void;
 };
 
 declare global {
@@ -144,13 +146,14 @@ export default function VoiceRecorder() {
         body: JSON.stringify({
           original_text: data.original || data.refined,
           refined_text: data.refined,
-          metadata: { source: "soyvoz-web" },
+          metadata: { source: "vozflow-web" },
         }),
       });
 
       if (!saveResponse.ok) {
         const saveError = await saveResponse.json();
         console.error("No se pudo guardar transcripción:", saveError);
+        toast.warning("Transcripción lista, pero no se pudo guardar en historial.");
       } else {
         window.dispatchEvent(new CustomEvent("soyvoz:transcription-saved"));
       }
@@ -271,6 +274,17 @@ export default function VoiceRecorder() {
 
     return cleanup;
   }, [stopAudioVisualization, toggleAction]);
+
+  // Listen for paste success/error events (only once on mount)
+  useEffect(() => {
+    window.electron?.onTypeTextSuccess?.(() => {
+      toast.success("Texto pegado en la aplicación activa");
+    });
+
+    window.electron?.onTypeTextError?.((errorMessage) => {
+      toast.error(`Error al pegar: ${errorMessage}. Texto disponible en portapapeles.`);
+    });
+  }, []);
 
   useEffect(() => {
     const isEditableTarget = (eventTarget: EventTarget | null) => {

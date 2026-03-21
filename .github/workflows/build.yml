@@ -39,7 +39,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: SoyVOZ-Installer-${{ matrix.os }}
+          name: VozFlow-Installer-${{ matrix.os }}
           path: |
             dist/*.exe
             dist/*.dmg

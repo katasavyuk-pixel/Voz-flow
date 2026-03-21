@@ -8,6 +8,7 @@ const {
   Tray,
   Menu,
   nativeImage,
+  clipboard,
 } = require("electron");
 const path = require("path");
 const isDev = require("electron-is-dev");
@@ -70,8 +71,8 @@ function createIndicatorWindow() {
     resizable: false,
     show: false,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
     },
   });
 
@@ -95,7 +96,7 @@ function createIndicatorWindow() {
     </style>
     <div class="container">
       <div class="dot"></div>
-      <div class="text">SoyVOZ Grabando</div>
+      <div class="text">Voz Flow Grabando</div>
       <div class="wave">
         <div class="bar" style="animation-delay: 0s"></div>
         <div class="bar" style="animation-delay: 0.15s"></div>
@@ -197,74 +198,141 @@ ipcMain.on("recording-state", (event, isRecording) => {
 });
 
 ipcMain.on("type-text", (event, text) => {
-  console.log("Typing text parity:", text.substring(0, 20) + "...");
-  // Nueva implementación: escribir texto directamente sin usar el portapapeles
+  console.log("Pasting text via clipboard:", text.substring(0, 30) + "...");
+
+  // Write text to clipboard
+  clipboard.writeText(text);
+
+  const timeout = setTimeout(() => {
+    event.sender.send("type-text-error", "Timeout al pegar texto");
+  }, 5000);
+
+  const handleSuccess = () => {
+    clearTimeout(timeout);
+    event.sender.send("type-text-success");
+  };
+
+  const handleError = (error) => {
+    clearTimeout(timeout);
+    console.error("Error pasting text:", error);
+    event.sender.send("type-text-error", error.message || "Error al pegar texto");
+  };
+
   if (process.platform === "darwin") {
-    // macOS: usar AppleScript para simular keystrokes por caracter
-    const escaped = text.replace(/"/g, '\\"');
-    const script = `set theText to "${escaped}"; tell application "System Events" to repeat with i from 1 to (length of theText) set ch to character i of theText; keystroke ch; end repeat`;
-    const cmd = `osascript -e '${script}'`;
+    // macOS: Simulate Cmd+V using AppleScript
+    const cmd = `osascript -e 'tell application "System Events" to keystroke "v" using command down'`;
     exec(cmd, (error) => {
-      if (error) console.error("Error typing text (Mac):", error);
+      if (error) {
+        handleError(error);
+      } else {
+        handleSuccess();
+      }
     });
   } else if (process.platform === "win32") {
-    // Windows: tipo carácter por carácter usando SendKeys en PowerShell
-    const escaped = text.replace(/"/g, '""');
-    const psScript = `Add-Type -AssemblyName System.Windows.Forms; $t = "${escaped}"; foreach ($c in $t.ToCharArray()) { [System.Windows.Forms.SendKeys]::SendWait($c) }`;
+    // Windows: Simulate Ctrl+V using PowerShell SendKeys
+    const psScript = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^v")`;
     exec(`powershell -Command "${psScript}"`, (error) => {
-      if (error) console.error("Error typing text (Windows):", error);
+      if (error) {
+        handleError(error);
+      } else {
+        handleSuccess();
+      }
+    });
+  } else {
+    // Linux: Use xdotool for Ctrl+V
+    exec("xdotool key ctrl+v", (error) => {
+      if (error) {
+        handleError(error);
+      } else {
+        handleSuccess();
+      }
     });
   }
 });
 
 ipcMain.handle("transcribe-audio", async (event, audioBuffer) => {
-  try {
-    const Groq = require("groq-sdk");
-    const groq = new Groq({
-      apiKey: process.env.GROQ_API_KEY,
-    });
+  const fs = require("fs");
+  const MAX_RETRIES = 3;
+  const BACKOFF_MS = [1000, 2000, 4000];
 
-    // 1. Transcribir con Groq Whisper
-    const fs = require("fs");
-    const tempPath = path.join(app.getPath("temp"), `audio_${Date.now()}.webm`);
-    fs.writeFileSync(tempPath, Buffer.from(audioBuffer));
+  // Check for API key
+  if (!process.env.GROQ_API_KEY) {
+    console.error("GROQ_API_KEY not found in environment variables");
+    throw new Error("API key de Groq no configurada. Revisa la configuración.");
+  }
 
-    const transcription = await groq.audio.transcriptions.create({
-      file: fs.createReadStream(tempPath),
-      model: "whisper-large-v3",
-      response_format: "verbose_json",
-      language: "es",
-    });
+  const Groq = require("groq-sdk");
+  const groq = new Groq({
+    apiKey: process.env.GROQ_API_KEY,
+  });
 
-    const originalText = transcription.text;
+  const tempPath = path.join(app.getPath("temp"), `audio_${Date.now()}.webm`);
+  fs.writeFileSync(tempPath, Buffer.from(audioBuffer));
 
-    // 2. Refinar con Llama 3
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        {
-          role: "system",
-          content:
-            "Eres un transcriptor de alta fidelidad. Tu objetivo es convertir el audio en texto EXACTAMENTE como fue dicho. REGLAS: 1. Mantén todas las palabras originales. 2. Respeta acentos y puntuación. 3. Elimina muletillas extremas. 4. NO resumas, NO parafrasees. Responde solo con el texto transcrito.",
-        },
-        {
-          role: "user",
-          content: originalText,
-        },
-      ],
-      model: "llama-3.3-70b-versatile",
-      temperature: 0.1,
-    });
-
+  const cleanupTemp = () => {
     try {
       fs.unlinkSync(tempPath);
-    } catch {}
+    } catch (e) {
+      console.warn("Could not delete temp file:", e.message);
+    }
+  };
 
-    return {
-      original: originalText,
-      refined: chatCompletion.choices[0]?.message?.content || originalText,
-    };
+  const attemptTranscription = async (attempt) => {
+    try {
+      console.log(`Transcription attempt ${attempt + 1}/${MAX_RETRIES}`);
+
+      // 1. Transcribe with Groq Whisper
+      const transcription = await groq.audio.transcriptions.create({
+        file: fs.createReadStream(tempPath),
+        model: "whisper-large-v3",
+        response_format: "verbose_json",
+        language: "es",
+      });
+
+      const originalText = transcription.text;
+
+      // 2. Refine with Llama 3
+      const chatCompletion = await groq.chat.completions.create({
+        messages: [
+          {
+            role: "system",
+            content:
+              "Eres un transcriptor de alta fidelidad. Tu objetivo es convertir el audio en texto EXACTAMENTE como fue dicho. REGLAS: 1. Mantén todas las palabras originales. 2. Respeta acentos y puntuación. 3. Elimina muletillas extremas. 4. NO resumas, NO parafrasees. Responde solo con el texto transcrito.",
+          },
+          {
+            role: "user",
+            content: originalText,
+          },
+        ],
+        model: "llama-3.3-70b-versatile",
+        temperature: 0.1,
+      });
+
+      return {
+        original: originalText,
+        refined: chatCompletion.choices[0]?.message?.content || originalText,
+      };
+    } catch (error) {
+      console.error(`Transcription attempt ${attempt + 1} failed:`, error.message);
+
+      if (attempt < MAX_RETRIES - 1) {
+        const delay = BACKOFF_MS[attempt];
+        console.log(`Retrying in ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        return attemptTranscription(attempt + 1);
+      }
+
+      throw error;
+    }
+  };
+
+  try {
+    const result = await attemptTranscription(0);
+    cleanupTemp();
+    return result;
   } catch (error) {
+    cleanupTemp();
     console.error("Error en transcribe-audio (Electron):", error);
-    throw error;
+    throw new Error(`Transcripción fallida: ${error.message}`);
   }
 });
