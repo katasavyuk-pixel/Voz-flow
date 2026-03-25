@@ -9,11 +9,14 @@ import {
   Sparkles,
   ArrowLeft,
   Keyboard,
-  History,
   Save,
   ShieldAlert,
   RefreshCw,
+  Hand,
+  CheckCircle,
+  XCircle,
 } from "lucide-react";
+import TranscriptionHistory from "@/components/TranscriptionHistory";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import Link from "next/link";
@@ -47,12 +50,15 @@ function parseSnippetsInput(value: string): FlowSnippet[] {
 }
 
 export default function DashboardPage() {
+  const [mounted, setMounted] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [refinedText, setRefinedText] = useState("");
   const [copied, setCopied] = useState(false);
   const [shortcutInput, setShortcutInput] = useState("");
   const [activeShortcut, setActiveShortcut] = useState("-");
+
+  useEffect(() => { setMounted(true); }, []);
   const [isSavingShortcut, setIsSavingShortcut] = useState(false);
   const [isCapturingShortcut, setIsCapturingShortcut] = useState(false);
   const [shortcutSavedFlash, setShortcutSavedFlash] = useState(false);
@@ -70,12 +76,15 @@ export default function DashboardPage() {
   const [isRunningPasteTest, setIsRunningPasteTest] = useState(false);
   const [dictionaryInput, setDictionaryInput] = useState("");
   const [snippetsInput, setSnippetsInput] = useState("");
-  const [history, setHistory] = useState<
-    Array<{ original: string; refined: string; date: Date }>
-  >([]);
+  const [appState, setAppState] = useState<string>("idle");
+  const [historyRefresh, setHistoryRefresh] = useState(0);
+  const [doubleTapEnabled, setDoubleTapEnabled] = useState(true);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const audioAnimFrameRef = useRef<number | null>(null);
   const isRecordingRef = useRef(false);
 
   useEffect(() => {
@@ -111,12 +120,34 @@ export default function DashboardPage() {
 
         const storedSnippets = localStorage.getItem("flow-snippets");
         if (storedSnippets) setSnippetsInput(storedSnippets);
+
+        // Load double-tap settings
+        if ((window as any).electron?.getDoubleTapSettings) {
+          const dtSettings = await (window as any).electron.getDoubleTapSettings();
+          setDoubleTapEnabled(dtSettings.enabled);
+        }
       } catch {
         setActiveShortcut("-");
       }
     };
 
     loadShortcut();
+  }, []);
+
+  // Listen for app state changes from main process
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).electron) return;
+    const unsub = (window as any).electron.onAppStateChanged?.((state: string) => {
+      setAppState(state);
+      if (state === "done") {
+        setIsProcessing(false);
+        setIsRecording(false);
+      } else if (state === "error") {
+        setIsProcessing(false);
+        setIsRecording(false);
+      }
+    });
+    return () => { if (typeof unsub === "function") unsub(); };
   }, []);
 
   const checkMacPermissions = useCallback(async () => {
@@ -209,10 +240,7 @@ export default function DashboardPage() {
         }
 
         setRefinedText(data.refined);
-        setHistory((prev) => [
-          { original: data.original, refined: data.refined, date: new Date() },
-          ...prev.slice(0, 9),
-        ]);
+        setHistoryRefresh((prev) => prev + 1);
         const copiedToClipboard = await copyToClipboardSafely(data.refined);
         if ((window as any).electron)
           (window as any).electron.typeText(data.refined);
@@ -255,6 +283,59 @@ export default function DashboardPage() {
     }
   }, []);
 
+  // Audio visualization: send FFT data to pill via IPC
+  const startAudioVisualization = useCallback((stream: MediaStream) => {
+    try {
+      const audioCtx = new AudioContext();
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+      audioContextRef.current = audioCtx;
+      analyserRef.current = analyser;
+
+      const NUM_BARS = 24;
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      const sendFrame = () => {
+        if (!analyserRef.current) return;
+        analyser.getByteFrequencyData(dataArray);
+
+        // Downsample to NUM_BARS
+        const binSize = Math.floor(dataArray.length / 2 / NUM_BARS);
+        const barValues: number[] = [];
+        for (let i = 0; i < NUM_BARS; i++) {
+          let sum = 0;
+          for (let j = 0; j < binSize; j++) {
+            sum += dataArray[i * binSize + j];
+          }
+          barValues.push(Math.min(1, (sum / binSize / 255) * 2));
+        }
+
+        if ((window as any).electron?.sendAudioData) {
+          (window as any).electron.sendAudioData(barValues);
+        }
+
+        audioAnimFrameRef.current = requestAnimationFrame(sendFrame);
+      };
+      audioAnimFrameRef.current = requestAnimationFrame(sendFrame);
+    } catch {
+      // Audio viz not critical
+    }
+  }, []);
+
+  const stopAudioVisualization = useCallback(() => {
+    if (audioAnimFrameRef.current) {
+      cancelAnimationFrame(audioAnimFrameRef.current);
+      audioAnimFrameRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+    analyserRef.current = null;
+  }, []);
+
   const startRecording = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -267,6 +348,7 @@ export default function DashboardPage() {
       };
 
       mediaRecorder.onstop = async () => {
+        stopAudioVisualization();
         const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
         await processAudio(audioBlob);
       };
@@ -274,13 +356,17 @@ export default function DashboardPage() {
       mediaRecorder.start();
       setIsRecording(true);
       setRefinedText("");
+
+      // Start audio visualization for the pill
+      startAudioVisualization(stream);
+
       if ((window as any).electron)
         (window as any).electron.setRecordingState(true);
       toast.info("Grabando...");
     } catch {
       toast.error("No se pudo acceder al micrófono");
     }
-  }, [processAudio]);
+  }, [processAudio, startAudioVisualization, stopAudioVisualization]);
 
   const toggleAction = useCallback(() => {
     if (isRecordingRef.current) {
@@ -748,34 +834,61 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {history.length > 0 && (
-            <div className="w-full mt-10">
-              <div className="flex items-center gap-2 mb-4">
-                <History className="w-4 h-4 text-gray-500" />
-                <span className="text-sm font-bold text-gray-500 uppercase tracking-wider">
-                  Historial
-                </span>
-              </div>
-              <div className="space-y-3">
-                {history.slice(0, 3).map((item, i) => (
-                  <div
-                    key={i}
-                    className="p-4 rounded-xl border border-white/5 bg-white/5 hover:bg-white/10 transition-all cursor-pointer"
-                    onClick={() => {
-                      setRefinedText(item.refined);
-                    }}
-                  >
-                    <p className="text-sm text-gray-300 line-clamp-2">
-                      {item.refined}
-                    </p>
-                    <p className="text-xs text-gray-600 mt-1">
-                      {item.date.toLocaleTimeString()}
-                    </p>
+          {/* Double-tap (Hands-free) settings card */}
+          {mounted && typeof window !== "undefined" && (window as any).electron && (
+            <div className="w-full mt-4">
+              <div className="p-5 rounded-2xl border border-white/5 bg-white/5 opacity-80">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Hand className="w-4 h-4 text-emerald-400" />
+                    <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">
+                      Modo Manos Libres
+                    </span>
                   </div>
-                ))}
+                  <button
+                    onClick={async () => {
+                      const next = !doubleTapEnabled;
+                      setDoubleTapEnabled(next);
+                      await (window as any).electron.setDoubleTapSettings({ enabled: next });
+                      toast.success(next ? "Doble-tap activado" : "Doble-tap desactivado");
+                    }}
+                    className={`relative w-10 h-5 rounded-full transition-colors ${
+                      doubleTapEnabled ? "bg-emerald-500" : "bg-gray-600"
+                    }`}
+                  >
+                    <div
+                      className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                        doubleTapEnabled ? "translate-x-5" : "translate-x-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  Doble toque en Ctrl para iniciar. Un toque para detener. Tambien puedes mantener Ctrl+Option.
+                </p>
               </div>
             </div>
           )}
+
+          {/* State indicator for done/error */}
+          {appState === "done" && (
+            <div className="flex items-center gap-2 mt-4 text-emerald-400 animate-pulse">
+              <CheckCircle className="w-4 h-4" />
+              <span className="text-sm font-medium">Listo</span>
+            </div>
+          )}
+          {appState === "error" && (
+            <div className="flex items-center gap-2 mt-4 text-red-400 animate-pulse">
+              <XCircle className="w-4 h-4" />
+              <span className="text-sm font-medium">Error en transcripcion</span>
+            </div>
+          )}
+
+          {/* Transcription history with search (SQLite) */}
+          <TranscriptionHistory
+            onSelect={(text) => setRefinedText(text)}
+            refreshTrigger={historyRefresh}
+          />
         </main>
       </div>
     </div>

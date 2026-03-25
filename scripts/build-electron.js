@@ -22,7 +22,19 @@ try {
     const isWin = process.platform === 'win32';
     const moveCmd = isWin ? 'move' : 'mv';
 
-    // 1. Rename api to _api to ignore it during static build
+    // 1. Rebuild native addons for Electron (better-sqlite3)
+    console.log('🔧 Rebuilding native addons for Electron...');
+    try {
+        execSync('npx electron-rebuild -f -w better-sqlite3', {
+            stdio: 'inherit',
+            cwd: projectRoot,
+        });
+        console.log('✅ Native addons rebuilt for Electron');
+    } catch (e) {
+        console.warn('⚠️ electron-rebuild failed (better-sqlite3 may still work):', e.message);
+    }
+
+    // 2. Rename api to _api to ignore it during static build
     if (fs.existsSync(apiDir)) {
         console.log('📦 Hiding API routes for static export...');
         try {
@@ -33,11 +45,11 @@ try {
         }
     }
 
-    // 2. Run next build with relative asset paths for file:// protocol
+    // 3. Run next build with relative asset paths for file:// protocol
     console.log('🏗️ Running next build...');
     execSync('npx next build', { stdio: 'inherit', env: { ...process.env, ELECTRON_BUILD: 'true' } });
 
-    // 3. Rename back
+    // 4. Rename back
     if (fs.existsSync(apiBackupDir)) {
         console.log('✅ Restoring API routes...');
         try {
@@ -47,11 +59,35 @@ try {
         }
     }
 
-    // 4. Run electron-builder
+    // 5. Run electron-builder
     console.log('📦 Packaging Electron app...');
     execSync('npx electron-builder', { stdio: 'inherit' });
 
-    console.log('✨ Build successful! Check the /dist folder.');
+    // 6. Print success and install instructions
+    const distDir = path.join(projectRoot, 'dist');
+    const appPath = path.join(distDir, 'Voz Flow.app');
+    const dmgFiles = fs.existsSync(distDir)
+        ? fs.readdirSync(distDir).filter(f => f.endsWith('.dmg'))
+        : [];
+
+    console.log('\n✨ Build successful!\n');
+    console.log('📁 Output: /dist/');
+
+    if (dmgFiles.length > 0) {
+        console.log(`💿 DMG: dist/${dmgFiles[0]}`);
+        console.log('\n📋 Para instalar:');
+        console.log(`   1. Abre dist/${dmgFiles[0]}`);
+        console.log('   2. Arrastra "Voz Flow" a Applications');
+        console.log('   3. Abre desde Launchpad o Spotlight');
+    }
+
+    if (fs.existsSync(appPath)) {
+        console.log('\n⚡ Para probar rapido sin instalar:');
+        console.log('   open "dist/Voz Flow.app"');
+    }
+
+    console.log('\n⚠️ Si macOS bloquea la app:');
+    console.log('   Preferencias del Sistema → Seguridad → "Abrir de todos modos"');
 
 } catch (error) {
     console.error('❌ Build failed:', error.message);

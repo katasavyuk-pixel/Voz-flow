@@ -13,6 +13,7 @@ const path = require("path");
 const fs = require("fs");
 const isDev = !app.isPackaged;
 const { exec, execSync } = require("child_process");
+const { TranscriptionDB } = require("./database");
 
 let mainWindow;
 let indicatorWindow;
@@ -22,6 +23,32 @@ let lastTargetAppBundleId = null;
 let lastTargetAppName = null;
 let shortcutRecordingState = false;
 app.isQuitting = false;
+
+// === APP STATE MACHINE (ported from SFlow) ===
+const AppState = {
+  IDLE: "idle",
+  RECORDING: "recording",
+  PROCESSING: "processing",
+  DONE: "done",
+  ERROR: "error",
+};
+let currentAppState = AppState.IDLE;
+let stateTimeoutId = null;
+
+// === LOCAL DATABASE ===
+let db = null;
+
+// === DOUBLE-TAP HOTKEY (ported from SFlow's hotkey.py) ===
+const DOUBLE_TAP_INTERVAL = 400; // ms
+let doubleTapEnabled = true;
+let lastCtrlPress = 0;
+let ctrlTapCount = 0;
+let isHandsFreeRecording = false;
+
+// Audio data throttle
+let lastAudioForward = 0;
+const AUDIO_FORWARD_INTERVAL = 33; // ~30fps
+
 const defaultShortcuts = [
   "CommandOrControl+Alt+R",
   "CommandOrControl+Alt+D",
@@ -363,52 +390,60 @@ function openMacPrivacyPane(section) {
   shell.openExternal(pane);
 }
 
+// === UNIFIED STATE MANAGEMENT (ported from SFlow) ===
+function setAppState(newState) {
+  if (stateTimeoutId) {
+    clearTimeout(stateTimeoutId);
+    stateTimeoutId = null;
+  }
+
+  currentAppState = newState;
+
+  // Update pill window
+  if (indicatorWindow && !indicatorWindow.isDestroyed()) {
+    indicatorWindow.webContents.send("pill-state", newState);
+
+    if (newState === AppState.IDLE) {
+      // Keep pill visible but small
+      indicatorWindow.showInactive();
+    } else {
+      indicatorWindow.setAlwaysOnTop(true, "screen-saver");
+      indicatorWindow.showInactive();
+    }
+  }
+
+  // Notify renderer
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("app-state-changed", newState);
+  }
+
+  // Auto-transition for done/error states (SFlow pattern)
+  if (newState === AppState.DONE) {
+    stateTimeoutId = setTimeout(() => setAppState(AppState.IDLE), 800);
+  } else if (newState === AppState.ERROR) {
+    stateTimeoutId = setTimeout(() => setAppState(AppState.IDLE), 1200);
+  }
+
+  // Sync shortcutRecordingState
+  shortcutRecordingState = newState === AppState.RECORDING;
+}
+
 function updateIndicatorUI(state) {
-  if (!indicatorWindow || indicatorWindow.isDestroyed()) return;
-
-  const config = {
-    recording: {
-      color: "#ef4444",
-      glow: "rgba(239, 68, 68, 0.7)",
-      text: "Voz Flow Grabando",
-      showWave: true,
-      borderColor: "rgba(239, 68, 68, 0.5)",
-    },
-    processing: {
-      color: "#a855f7",
-      glow: "rgba(168, 85, 247, 0.7)",
-      text: "Groq AI Procesando...",
-      showWave: false,
-      borderColor: "rgba(168, 85, 247, 0.6)",
-    },
-  };
-
-  const current = config[state];
-  if (!current) {
-    indicatorWindow.hide();
-    return;
-  }
-
-  const js = `
-    document.querySelector('.dot').style.background = '${current.color}';
-    document.querySelector('.dot').style.boxShadow = '0 0 15px ${current.glow}';
-    document.querySelector('.text').innerText = '${current.text}';
-    document.querySelector('.wave').style.display = '${current.showWave ? "flex" : "none"}';
-    document.querySelector('.container').style.borderColor = '${current.borderColor}';
-  `;
-
-  indicatorWindow.webContents.executeJavaScript(js);
-
-  if (state === "recording" || state === "processing") {
-    const { width } = screen.getPrimaryDisplay().workAreaSize;
-    indicatorWindow.setPosition(Math.round(width / 2 - 160), 40);
-    indicatorWindow.setAlwaysOnTop(true, "screen-saver");
-    indicatorWindow.showInactive();
-  }
+  // Legacy compatibility — map old calls to new state system
+  if (state === "recording") setAppState(AppState.RECORDING);
+  else if (state === "processing") setAppState(AppState.PROCESSING);
+  else if (state === "done") setAppState(AppState.DONE);
+  else if (state === "error") setAppState(AppState.ERROR);
+  else setAppState(AppState.IDLE);
 }
 
 function setIndicatorVisible(isRecording) {
-  updateIndicatorUI(isRecording ? "recording" : "off");
+  if (isRecording) {
+    setAppState(AppState.RECORDING);
+  } else if (currentAppState === AppState.RECORDING) {
+    // Only go idle if we were recording (not if processing)
+    setAppState(AppState.IDLE);
+  }
 }
 
 function dispatchToggleRecordingToRenderer() {
@@ -547,54 +582,46 @@ function createTray() {
 }
 
 function createIndicatorWindow() {
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
+
   indicatorWindow = new BrowserWindow({
-    width: 320,
-    height: 70,
+    width: 38,
+    height: 36,
+    x: Math.round(screenW / 2 - 19),
+    y: screenH - 60,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: false,
+    focusable: false,
     show: false,
+    hasShadow: false,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      preload: path.join(__dirname, "pill-preload.js"),
+      nodeIntegration: false,
+      contextIsolation: true,
     },
   });
 
-  const htmlContent = `
-    <style>
-      body { margin: 0; padding: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-      .container { 
-        display: flex; align-items: center; justify-content: center; gap: 12px;
-        background: rgba(10, 10, 11, 0.9); 
-        border: 1px solid rgba(168, 85, 247, 0.5);
-        border-radius: 50px; height: 50px; padding: 0 24px;
-        backdrop-filter: blur(15px); color: white;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 15px rgba(168, 85, 247, 0.2);
-      }
-      .dot { width: 10px; height: 10px; background: #ef4444; border-radius: 50%; animation: pulse 1.2s infinite; }
-      .text { font-weight: 800; font-size: 12px; letter-spacing: 1px; color: #f3f4f6; text-transform: uppercase; }
-      @keyframes pulse { 0% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 70% { opacity: 0.5; transform: scale(1.1); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); } 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
-      .wave { display: flex; align-items: center; gap: 4px; }
-      .bar { width: 3px; height: 12px; background: linear-gradient(to bottom, #a855f7, #06b6d4); border-radius: 10px; animation: wave 0.8s infinite alternate ease-in-out; }
-      @keyframes wave { from { height: 6px; transform: scaleY(0.8); } to { height: 18px; transform: scaleY(1.2); } }
-    </style>
-    <div class="container">
-      <div class="dot"></div>
-      <div class="text">SoyVOZ Grabando</div>
-      <div class="wave">
-        <div class="bar" style="animation-delay: 0s"></div>
-        <div class="bar" style="animation-delay: 0.15s"></div>
-        <div class="bar" style="animation-delay: 0.3s"></div>
-        <div class="bar" style="animation-delay: 0.45s"></div>
-      </div>
-    </div>
-  `;
+  indicatorWindow.setAlwaysOnTop(true, "screen-saver");
+  indicatorWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
-  indicatorWindow.loadURL(
-    `data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`,
-  );
+  const pillPath = isDev
+    ? path.join(__dirname, "pill.html")
+    : path.join(__dirname, "pill.html");
+  indicatorWindow.loadFile(pillPath);
+
+  indicatorWindow.once("ready-to-show", () => {
+    indicatorWindow.showInactive();
+  });
+
+  // Handle resize requests from pill HTML
+  ipcMain.on("pill-resize", (event, width, height) => {
+    if (indicatorWindow && !indicatorWindow.isDestroyed()) {
+      indicatorWindow.setSize(Math.max(38, Math.round(width)), Math.round(height));
+    }
+  });
 }
 
 function createWindow() {
@@ -681,6 +708,18 @@ app.whenReady().then(() => {
   initSelfBundleId();
   console.log(`[Voz Flow] Self bundle ID: ${selfBundleId}`);
 
+  // Initialize local SQLite database
+  try {
+    db = new TranscriptionDB();
+    console.log(`[Voz Flow] DB initialized. ${db.count()} transcriptions stored.`);
+  } catch (err) {
+    console.warn("[Voz Flow] DB init failed (history disabled):", err.message);
+  }
+
+  // Load double-tap settings
+  const settings = loadSettings();
+  doubleTapEnabled = settings.doubleTapEnabled !== false;
+
   if (process.platform === "darwin" && app.dock) {
     try {
       app.dock.setIcon(getDockIconPath());
@@ -708,6 +747,11 @@ app.on("before-quit", () => {
   }
   if (indicatorWindow && !indicatorWindow.isDestroyed()) {
     indicatorWindow.destroy();
+  }
+  // Close SQLite DB
+  if (db) {
+    try { db.close(); } catch { /* ignore */ }
+    db = null;
   }
 });
 
@@ -806,6 +850,61 @@ ipcMain.handle("schedule-paste-test", (event, rawDelayMs) => {
   return { ok: true, delayMs };
 });
 
+// === DATABASE IPC HANDLERS ===
+ipcMain.handle("db-insert", (_, record) => {
+  if (!db) return null;
+  return db.insert(record);
+});
+
+ipcMain.handle("db-get-recent", (_, limit) => {
+  if (!db) return [];
+  return db.getRecent(limit || 50);
+});
+
+ipcMain.handle("db-search", (_, query, limit) => {
+  if (!db) return [];
+  return db.search(query, limit || 50);
+});
+
+ipcMain.handle("db-count", () => {
+  if (!db) return 0;
+  return db.count();
+});
+
+ipcMain.handle("db-delete", (_, id) => {
+  if (!db) return false;
+  return db.deleteById(id);
+});
+
+// === AUDIO DATA FORWARDING (renderer → pill) ===
+ipcMain.on("audio-data", (event, barValues) => {
+  const now = Date.now();
+  if (now - lastAudioForward < AUDIO_FORWARD_INTERVAL) return;
+  lastAudioForward = now;
+
+  if (indicatorWindow && !indicatorWindow.isDestroyed()) {
+    indicatorWindow.webContents.send("pill-audio-data", barValues);
+  }
+});
+
+// === DOUBLE-TAP SETTINGS ===
+ipcMain.handle("get-doubletap-settings", () => {
+  const settings = loadSettings();
+  return {
+    enabled: settings.doubleTapEnabled !== false,
+    interval: settings.doubleTapInterval || DOUBLE_TAP_INTERVAL,
+  };
+});
+
+ipcMain.handle("set-doubletap-settings", (_, newSettings) => {
+  doubleTapEnabled = newSettings.enabled !== false;
+  saveSettings({
+    doubleTapEnabled: doubleTapEnabled,
+    doubleTapInterval: newSettings.interval || DOUBLE_TAP_INTERVAL,
+  });
+  return { ok: true };
+});
+
 ipcMain.on("recording-state", (event, isRecording) => {
   shortcutRecordingState = Boolean(isRecording);
   setIndicatorVisible(shortcutRecordingState);
@@ -883,14 +982,35 @@ ipcMain.handle(
         fs.unlinkSync(tempPath);
       } catch (e) { }
 
-      console.log("[Voz Flow] Refinamiento completado. Caracteres:", chatCompletion.choices[0]?.message?.content?.length || 0);
+      const refinedText = chatCompletion.choices[0]?.message?.content || originalText;
+      console.log("[Voz Flow] Refinamiento completado. Caracteres:", refinedText.length);
+
+      // Auto-save to local SQLite DB
+      try {
+        if (db) {
+          db.insert({
+            originalText,
+            refinedText,
+            language: transcription.language || null,
+            durationSeconds: transcription.duration || null,
+            model: "whisper-large-v3",
+          });
+          console.log("[Voz Flow] Transcripcion guardada en DB local");
+        }
+      } catch (dbErr) {
+        console.error("[Voz Flow] Error guardando en DB (non-fatal):", dbErr.message);
+      }
+
+      // Transition to DONE state
+      setAppState(AppState.DONE);
 
       return {
         original: originalText,
-        refined: chatCompletion.choices[0]?.message?.content || originalText,
+        refined: refinedText,
       };
     } catch (error) {
       console.error("[Voz Flow] Error en transcribe-audio (Electron):", error);
+      setAppState(AppState.ERROR);
 
       if (error.status === 403 || (error.message && error.message.includes("403"))) {
         throw new Error(

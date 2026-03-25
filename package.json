@@ -12,13 +12,17 @@
     "test:e2e": "playwright test",
     "format": "prettier --write .",
     "electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3333 && electron .\"",
-    "electron-build": "node scripts/build-electron.js"
+    "electron-build": "node scripts/build-electron.js",
+    "app": "npm run electron-build && open dist/Voz\\ Flow.app",
+    "app:open": "open dist/Voz\\ Flow.app",
+    "postinstall": "electron-rebuild -f -w better-sqlite3 2>/dev/null || true"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
     "@stripe/stripe-js": "^8.7.0",
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.97.0",
+    "better-sqlite3": "^12.8.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.34.2",
@@ -49,6 +53,7 @@
     "concurrently": "^9.2.1",
     "electron": "^34.0.0",
     "electron-builder": "^25.1.8",
+    "electron-rebuild": "^3.2.9",
     "eslint": "^9",
     "eslint-config-next": "^16.1.6",
     "jsdom": "^28.1.0",
@@ -73,6 +78,9 @@
       "out/**/*",
       "node_modules/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**"
     ],
     "mac": {
       "target": [
