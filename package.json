@@ -15,7 +15,7 @@
     "electron-build": "node scripts/build-electron.js",
     "app": "npm run electron-build && open dist/Voz\\ Flow.app",
     "app:open": "open dist/Voz\\ Flow.app",
-    "postinstall": "electron-rebuild -f -w better-sqlite3 2>/dev/null || true"
+    "postinstall": "electron-rebuild -f -w better-sqlite3 -w uiohook-napi 2>/dev/null || true"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -38,6 +38,7 @@
     "sonner": "^2.0.7",
     "stripe": "^20.3.1",
     "tailwind-merge": "^3.4.1",
+    "uiohook-napi": "^1.5.5",
     "zod": "^4.3.6",
     "zustand": "^5.0.11"
   },
@@ -80,7 +81,8 @@
       "package.json"
     ],
     "asarUnpack": [
-      "node_modules/better-sqlite3/**"
+      "node_modules/better-sqlite3/**",
+      "node_modules/uiohook-napi/**"
     ],
     "mac": {
       "target": [

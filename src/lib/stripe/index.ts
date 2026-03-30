@@ -1,8 +1,9 @@
 import Stripe from "stripe";
 
-export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "sk_test_51dummy", {
-    typescript: true,
-});
+const stripeKey = process.env.STRIPE_SECRET_KEY;
+export const stripe = stripeKey
+    ? new Stripe(stripeKey, { typescript: true })
+    : (null as unknown as Stripe);
 
 /**
  * Creates a Stripe Checkout session for subscription

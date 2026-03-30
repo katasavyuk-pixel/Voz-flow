@@ -26,9 +26,12 @@ export default function TranscriptionHistory({
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [totalCount, setTotalCount] = useState(0);
   const [visibleCount, setVisibleCount] = useState(20);
+  const [mounted, setMounted] = useState(false);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const isElectron = typeof window !== "undefined" && !!(window as any).electron?.dbGetRecent;
+  useEffect(() => { setMounted(true); }, []);
+
+  const isElectron = mounted && !!(window as any).electron?.dbGetRecent;
 
   const loadHistory = useCallback(async () => {
     if (!isElectron) return;

@@ -86,6 +86,8 @@ export default function DashboardPage() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const audioAnimFrameRef = useRef<number | null>(null);
   const isRecordingRef = useRef(false);
+  const recordingStartTimeRef = useRef<number>(0);
+  const autoStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     isRecordingRef.current = isRecording;
@@ -239,11 +241,19 @@ export default function DashboardPage() {
           data = await response.json();
         }
 
-        setRefinedText(data.refined);
+        const refined = (data.refined || "").trim();
+
+        // Don't paste empty text
+        if (!refined) {
+          toast.info("No se detecto voz");
+          return;
+        }
+
+        setRefinedText(refined);
         setHistoryRefresh((prev) => prev + 1);
-        const copiedToClipboard = await copyToClipboardSafely(data.refined);
+        const copiedToClipboard = await copyToClipboardSafely(refined);
         if ((window as any).electron)
-          (window as any).electron.typeText(data.refined);
+          (window as any).electron.typeText(refined);
         if (copiedToClipboard) {
           setCopied(true);
           toast.success("Texto copiado al portapapeles");
@@ -255,9 +265,7 @@ export default function DashboardPage() {
         toast.error(error.message || "Error al procesar");
       } finally {
         setIsProcessing(false);
-        if ((window as any).electron?.setIndicatorState) {
-          (window as any).electron.setIndicatorState("off");
-        }
+        // State machine in main.js handles DONE -> IDLE transition automatically
       }
     },
     [copyToClipboardSafely, dictionaryInput, snippetsInput],
@@ -338,10 +346,20 @@ export default function DashboardPage() {
 
   const startRecording = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+      const mediaRecorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
+      recordingStartTimeRef.current = Date.now();
 
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
@@ -349,6 +367,22 @@ export default function DashboardPage() {
 
       mediaRecorder.onstop = async () => {
         stopAudioVisualization();
+        if (autoStopTimerRef.current) {
+          clearTimeout(autoStopTimerRef.current);
+          autoStopTimerRef.current = null;
+        }
+
+        const durationMs = Date.now() - recordingStartTimeRef.current;
+
+        // Skip if too short (<0.5s) — likely accidental
+        if (durationMs < 500) {
+          toast.info("Grabacion muy corta");
+          if ((window as any).electron?.setIndicatorState) {
+            (window as any).electron.setIndicatorState("idle");
+          }
+          return;
+        }
+
         const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
         await processAudio(audioBlob);
       };
@@ -356,6 +390,14 @@ export default function DashboardPage() {
       mediaRecorder.start();
       setIsRecording(true);
       setRefinedText("");
+
+      // Auto-stop after 2 minutes as safety net
+      autoStopTimerRef.current = setTimeout(() => {
+        if (isRecordingRef.current) {
+          toast.info("Grabacion detenida (limite 2 min)");
+          stopRecording();
+        }
+      }, 120000);
 
       // Start audio visualization for the pill
       startAudioVisualization(stream);
@@ -366,7 +408,7 @@ export default function DashboardPage() {
     } catch {
       toast.error("No se pudo acceder al micrófono");
     }
-  }, [processAudio, startAudioVisualization, stopAudioVisualization]);
+  }, [processAudio, startAudioVisualization, stopAudioVisualization, stopRecording]);
 
   const toggleAction = useCallback(() => {
     if (isRecordingRef.current) {
@@ -386,6 +428,19 @@ export default function DashboardPage() {
       if (typeof unsubscribe === "function") unsubscribe();
     };
   }, [toggleAction]);
+
+  // Listen for paste result feedback from main process
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).electron?.onPasteResult) return;
+    const unsubscribe = (window as any).electron.onPasteResult((result: { ok: boolean; error?: string }) => {
+      if (!result.ok && result.error) {
+        toast.error(result.error);
+      }
+    });
+    return () => {
+      if (typeof unsubscribe === "function") unsubscribe();
+    };
+  }, []);
 
   const saveShortcutValue = useCallback(async (rawShortcut: string) => {
     if (!(window as any).electron?.setShortcut) {

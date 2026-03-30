@@ -14,43 +14,43 @@
   #pill {
     position: absolute;
     top: 0; left: 0;
-    height: 36px;
-    border-radius: 18px;
-    background: rgba(15, 15, 15, 0.92);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    height: 28px;
+    border-radius: 14px;
+    background: rgba(10, 10, 12, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    box-shadow: 0 2px 16px rgba(0,0,0,0.4);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
     display: flex;
     align-items: center;
     overflow: hidden;
     transition: none;
   }
   #logo {
-    width: 22px; height: 22px;
-    margin-left: 7px;
+    width: 20px; height: 20px;
+    margin-left: 4px;
     flex-shrink: 0;
-    border-radius: 6px;
-    background: linear-gradient(135deg, #a855f7, #06b6d4);
+    border-radius: 50%;
+    overflow: hidden;
     display: flex; align-items: center; justify-content: center;
   }
-  #logo svg { width: 12px; height: 12px; fill: white; }
+  #logo img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+  }
   #content {
     flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
     overflow: hidden;
-    margin: 0 4px;
+    margin: 0 3px;
   }
-  canvas#visualizer { display: none; width: 100%; height: 30px; }
+  canvas#visualizer { display: none; width: 100%; height: 22px; }
 
   /* Spinner (processing state) */
   .spinner { display: none; }
-  .spinner .dot {
-    width: 3px; height: 3px;
-    border-radius: 50%;
-    background: white;
-    position: absolute;
-  }
 
   /* Checkmark (done state) */
   .checkmark { display: none; }
@@ -64,7 +64,7 @@
 <body>
 <div id="pill">
   <div id="logo">
-    <svg viewBox="0 0 24 24"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+    <img src="pill-logo.png" alt="">
   </div>
   <div id="content">
     <canvas id="visualizer"></canvas>
@@ -84,14 +84,16 @@
 </div>
 
 <script>
-// === CONFIG (ported from SFlow) ===
-const PILL_WIDTH_IDLE = 38;
-const PILL_WIDTH_RECORDING = 140;
-const PILL_WIDTH_STATUS = 72;
-const PILL_HEIGHT = 36;
-const NUM_BARS = 24;
-const SPRING_STIFFNESS = 35;
-const SPRING_DAMPING = 8;
+// === CONFIG ===
+const PILL_WIDTH_IDLE = 32;
+const PILL_WIDTH_RECORDING = 105;
+const PILL_WIDTH_STATUS = 58;
+const PILL_HEIGHT = 28;
+const NUM_BARS = 28;
+
+// Smoother spring physics
+const SPRING_STIFFNESS = 18;
+const SPRING_DAMPING = 6;
 
 // === STATE ===
 let currentState = "idle";
@@ -106,7 +108,6 @@ const barTargets = new Float32Array(NUM_BARS);
 
 // Spinner state
 let spinnerAngle = 0;
-let spinnerInterval = null;
 
 // DOM
 const pill = document.getElementById("pill");
@@ -116,28 +117,26 @@ const spinnerEl = document.getElementById("spinner");
 const checkmarkEl = document.getElementById("checkmark");
 const errorXEl = document.getElementById("errorX");
 
-// === PILL WIDTH ANIMATION (ported from SFlow's _animate_width) ===
+// === PILL WIDTH ANIMATION ===
 function animatePill() {
   const diff = targetWidth - currentWidth;
-  if (Math.abs(diff) < 0.5) {
+  if (Math.abs(diff) < 0.3) {
     currentWidth = targetWidth;
   } else {
-    currentWidth += diff * 0.22;
+    // Smoother easing
+    currentWidth += diff * 0.14;
   }
 
   pill.style.width = Math.round(currentWidth) + "px";
 
-  // Request resize from main process
   if (window.pillBridge) {
     window.pillBridge.requestResize(Math.round(currentWidth), PILL_HEIGHT);
   }
 
-  // Draw visualizer if recording
   if (currentState === "recording") {
     drawVisualizer();
   }
 
-  // Draw spinner if processing
   if (currentState === "processing") {
     drawSpinner();
   }
@@ -145,7 +144,7 @@ function animatePill() {
   animFrameId = requestAnimationFrame(animatePill);
 }
 
-// === AUDIO VISUALIZER (ported from SFlow's AudioVisualizer) ===
+// === AUDIO VISUALIZER — smooth, subtle, professional ===
 function updateBarPhysics() {
   const dt = 1.0 / 60;
   for (let i = 0; i < NUM_BARS; i++) {
@@ -154,7 +153,7 @@ function updateBarPhysics() {
     barVelocities[i] *= Math.max(0, 1.0 - SPRING_DAMPING * dt);
     barValues[i] += barVelocities[i] * dt;
 
-    if (barValues[i] < 0.005) {
+    if (barValues[i] < 0.003) {
       barValues[i] = 0;
       barVelocities[i] = 0;
     } else if (barValues[i] > 1.0) {
@@ -166,47 +165,56 @@ function updateBarPhysics() {
 function drawVisualizer() {
   updateBarPhysics();
 
+  // Re-measure canvas every frame so it tracks the pill width animation
+  resizeCanvas();
+
+  const dpr = window.devicePixelRatio || 1;
   const w = canvas.width;
-  const h = canvas.height;
-  if (w <= 0 || h <= 0) return;
+  const rawH = canvas.height;
+  if (w <= 0 || rawH <= 0) return;
 
-  ctx.clearRect(0, 0, w, h);
+  // Work in CSS coordinates (ctx is already scaled by dpr)
+  const cssW = w / dpr;
+  const h = rawH / dpr;
 
-  const barW = 1.8;
-  const gap = 2.0;
+  ctx.clearRect(0, 0, cssW, h);
+  const pad = 2;
+  const availW = cssW - pad * 2;
+  const gap = 1.0;
+  const barW = Math.max(1, (availW - (NUM_BARS - 1) * gap) / NUM_BARS);
   const totalW = NUM_BARS * barW + (NUM_BARS - 1) * gap;
-  const xOff = (w - totalW) / 2;
-  const minH = 2;
+  const xOff = (cssW - totalW) / 2;
+  const minH = 1;
   const centerIdx = NUM_BARS / 2;
 
   for (let i = 0; i < NUM_BARS; i++) {
     const val = barValues[i];
     const dist = Math.abs(i - centerIdx + 0.5) / centerIdx;
-    // Gaussian bell-curve taper from center (SFlow)
-    const taper = Math.exp(-dist * dist * 1.2);
-    const barH = Math.max(minH, val * h * 1.6 * taper);
+    // Wider, softer bell curve taper
+    const taper = Math.exp(-dist * dist * 2.0);
+    const barH = Math.max(minH, val * h * 1.4 * taper);
     const x = xOff + i * (barW + gap);
     const cy = h / 2;
     const y = cy - barH / 2;
 
-    // Glow layer
-    if (val > 0.02) {
-      const glowAlpha = val * 0.16 * taper;
-      const glowSpread = barW + 3;
-      ctx.fillStyle = `rgba(255, 255, 255, ${glowAlpha})`;
+    // Subtle glow — very faint
+    if (val > 0.05) {
+      const glowAlpha = val * 0.06 * taper;
+      const glowSpread = barW + 2;
+      ctx.fillStyle = `rgba(168, 140, 255, ${glowAlpha})`;
       ctx.beginPath();
-      ctx.roundRect(x - (glowSpread - barW) / 2, y - 1, glowSpread, barH + 2, glowSpread / 2);
+      ctx.roundRect(x - (glowSpread - barW) / 2, y - 0.5, glowSpread, barH + 1, glowSpread / 2);
       ctx.fill();
     }
 
-    // Main bar with vertical gradient
-    const peakAlpha = ((100 + val * 155) * taper) / 255;
-    const edgeAlpha = peakAlpha * 0.3;
+    // Main bar — soft white with hint of purple
+    const peakAlpha = Math.min(0.55, ((70 + val * 120) * taper) / 255);
+    const edgeAlpha = peakAlpha * 0.2;
     const gradient = ctx.createLinearGradient(x, y, x, y + barH);
-    gradient.addColorStop(0, `rgba(255, 255, 255, ${edgeAlpha})`);
-    gradient.addColorStop(0.35, `rgba(255, 255, 255, ${peakAlpha})`);
-    gradient.addColorStop(0.65, `rgba(255, 255, 255, ${peakAlpha})`);
-    gradient.addColorStop(1, `rgba(255, 255, 255, ${edgeAlpha})`);
+    gradient.addColorStop(0, `rgba(200, 190, 255, ${edgeAlpha})`);
+    gradient.addColorStop(0.4, `rgba(255, 255, 255, ${peakAlpha})`);
+    gradient.addColorStop(0.6, `rgba(255, 255, 255, ${peakAlpha})`);
+    gradient.addColorStop(1, `rgba(200, 190, 255, ${edgeAlpha})`);
     ctx.fillStyle = gradient;
     ctx.beginPath();
     ctx.roundRect(x, y, barW, barH, barW / 2);
@@ -214,9 +222,8 @@ function drawVisualizer() {
   }
 }
 
-// === SPINNER (ported from SFlow) ===
+// === SPINNER — minimal dots ===
 function drawSpinner() {
-  // Drawn via CSS-positioned dots, animated
   spinnerEl.innerHTML = "";
   spinnerEl.style.position = "relative";
   spinnerEl.style.width = "16px";
@@ -226,33 +233,27 @@ function drawSpinner() {
     const angle = ((spinnerAngle + i * 60) * Math.PI) / 180;
     const dx = 6 * Math.cos(angle);
     const dy = 6 * Math.sin(angle);
-    const alpha = Math.max(0.12, (220 - i * 35) / 255);
+    const alpha = Math.max(0.08, (180 - i * 30) / 255);
 
     const dot = document.createElement("div");
     dot.style.cssText = `
-      position: absolute; width: 2.5px; height: 2.5px; border-radius: 50%;
+      position: absolute; width: 2px; height: 2px; border-radius: 50%;
       background: rgba(255,255,255,${alpha});
-      left: ${8 + dx - 1.25}px; top: ${8 + dy - 1.25}px;
+      left: ${8 + dx - 1}px; top: ${8 + dy - 1}px;
     `;
     spinnerEl.appendChild(dot);
   }
-  spinnerAngle = (spinnerAngle + 6) % 360;
+  spinnerAngle = (spinnerAngle + 4) % 360;
 }
 
 // === STATE MANAGEMENT ===
 function setState(state) {
   currentState = state;
 
-  // Hide all content elements
   canvas.style.display = "none";
   spinnerEl.style.display = "none";
   checkmarkEl.style.display = "none";
   errorXEl.style.display = "none";
-
-  if (spinnerInterval) {
-    clearInterval(spinnerInterval);
-    spinnerInterval = null;
-  }
 
   switch (state) {
     case "idle":
@@ -263,7 +264,6 @@ function setState(state) {
     case "recording":
       targetWidth = PILL_WIDTH_RECORDING;
       canvas.style.display = "block";
-      // Size canvas to content area
       resizeCanvas();
       break;
 
@@ -289,26 +289,30 @@ function setState(state) {
       break;
   }
 
-  // Update border color based on state
+  // Subtle border color per state
   const borderColors = {
-    idle: "rgba(255,255,255,0.06)",
-    recording: "rgba(239,68,68,0.3)",
-    processing: "rgba(168,85,247,0.3)",
-    done: "rgba(80,210,120,0.3)",
-    error: "rgba(255,70,70,0.3)",
+    idle: "rgba(255,255,255,0.04)",
+    recording: "rgba(255,255,255,0.08)",
+    processing: "rgba(168,140,255,0.15)",
+    done: "rgba(80,210,120,0.2)",
+    error: "rgba(255,70,70,0.2)",
   };
   pill.style.borderColor = borderColors[state] || borderColors.idle;
 }
 
 function resizeCanvas() {
-  // Canvas fills the content area
   const contentEl = document.getElementById("content");
   const rect = contentEl.getBoundingClientRect();
-  canvas.width = Math.max(10, rect.width * window.devicePixelRatio);
-  canvas.height = Math.max(10, rect.height * window.devicePixelRatio);
-  canvas.style.width = rect.width + "px";
-  canvas.style.height = rect.height + "px";
-  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  const newW = Math.max(10, Math.round(rect.width * window.devicePixelRatio));
+  const newH = Math.max(10, Math.round(rect.height * window.devicePixelRatio));
+  // Only resize if dimensions actually changed (avoids flicker)
+  if (canvas.width !== newW || canvas.height !== newH) {
+    canvas.width = newW;
+    canvas.height = newH;
+    canvas.style.width = rect.width + "px";
+    canvas.style.height = rect.height + "px";
+    ctx.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
+  }
 }
 
 // === IPC BRIDGE ===
@@ -319,9 +323,14 @@ if (window.pillBridge) {
 
   window.pillBridge.onAudioData((data) => {
     if (currentState !== "recording") return;
-    // data is an array of bar target values [0..1]
-    for (let i = 0; i < NUM_BARS && i < data.length; i++) {
-      barTargets[i] = data[i];
+    // Interpolate incoming data to NUM_BARS
+    const srcLen = data.length;
+    for (let i = 0; i < NUM_BARS; i++) {
+      const srcIdx = (i / NUM_BARS) * srcLen;
+      const lo = Math.floor(srcIdx);
+      const hi = Math.min(lo + 1, srcLen - 1);
+      const frac = srcIdx - lo;
+      barTargets[i] = data[lo] * (1 - frac) + data[hi] * frac;
     }
   });
 }

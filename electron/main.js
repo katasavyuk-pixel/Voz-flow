@@ -14,6 +14,7 @@ const fs = require("fs");
 const isDev = !app.isPackaged;
 const { exec, execSync } = require("child_process");
 const { TranscriptionDB } = require("./database");
+const { UiohookKey, uIOhook } = require("uiohook-napi");
 
 let mainWindow;
 let indicatorWindow;
@@ -48,6 +49,71 @@ let isHandsFreeRecording = false;
 // Audio data throttle
 let lastAudioForward = 0;
 const AUDIO_FORWARD_INTERVAL = 33; // ~30fps
+
+// === DOUBLE-TAP CTRL: global keyboard listener via uiohook-napi ===
+let doubleTapCooldown = 0; // Cooldown to prevent instant re-trigger
+let ctrlIsDown = false;    // Track key-down to ignore repeats
+
+function startDoubleTapListener() {
+  // Use keydown to track press state, keyup to count taps
+  uIOhook.on("keydown", (e) => {
+    if (e.keycode === UiohookKey.Ctrl || e.keycode === UiohookKey.CtrlRight) {
+      ctrlIsDown = true;
+    } else {
+      // Any non-Ctrl key resets tap count
+      ctrlTapCount = 0;
+    }
+  });
+
+  uIOhook.on("keyup", (e) => {
+    if (!doubleTapEnabled) return;
+    if (e.keycode !== UiohookKey.Ctrl && e.keycode !== UiohookKey.CtrlRight) return;
+
+    ctrlIsDown = false;
+    const now = Date.now();
+
+    // Ignore if within cooldown (prevents re-trigger on stop)
+    if (now - doubleTapCooldown < 600) return;
+
+    if (now - lastCtrlPress < DOUBLE_TAP_INTERVAL) {
+      ctrlTapCount++;
+    } else {
+      ctrlTapCount = 1;
+    }
+    lastCtrlPress = now;
+
+    if (ctrlTapCount >= 2) {
+      ctrlTapCount = 0;
+      doubleTapCooldown = now; // Set cooldown
+      console.log("[Voz Flow] Double-tap Ctrl detected — toggling recording");
+
+      // Same logic as shortcut handler
+      const wasRecording = shortcutRecordingState;
+      shortcutRecordingState = !shortcutRecordingState;
+
+      if (!wasRecording && shortcutRecordingState) {
+        try {
+          if (process.platform === "darwin") {
+            const focused = captureFrontmostApp();
+            if (focused.bundleId && focused.bundleId !== selfBundleId) {
+              lastTargetAppBundleId = focused.bundleId;
+              lastTargetAppName = focused.appName;
+              console.log(`[Voz Flow] Target captured on double-tap: ${focused.appName} (${focused.bundleId})`);
+            }
+          }
+        } catch (err) {
+          console.error("[Voz Flow] Error capturing target (non-fatal):", err.message);
+        }
+      }
+
+      setIndicatorVisible(shortcutRecordingState);
+      dispatchToggleRecordingToRenderer();
+    }
+  });
+
+  uIOhook.start();
+  console.log("[Voz Flow] Double-tap Ctrl listener started (uiohook)");
+}
 
 const defaultShortcuts = [
   "CommandOrControl+Alt+R",
@@ -99,43 +165,27 @@ function buildFlowSystemPrompt(config) {
       .join("\n")}`
     : "";
 
-  return `Eres un motor de transcripcion y edicion de voz de alto rendimiento llamado "Flow".
-Tu unica funcion es transformar texto hablado crudo en texto escrito limpio, pulido y perfectamente formateado, manteniendo al 100% el sentido e intencion original.
+  return `Eres un limpiador minimo de transcripciones de voz. Tu trabajo es hacer el MENOR cambio posible para que el texto sea legible.
 
-NO eres un chatbot. NO respondes preguntas. NO das opiniones. NO anades informacion. SOLO editas.
+REGLAS ESTRICTAS:
+1) CONSERVA las palabras exactas del hablante. NO reemplaces palabras por sinonimos. NO reescribas frases.
+2) Solo elimina muletillas obvias: eh, um, mmm, este, eee, ah.
+3) Agrega puntuacion basica (comas, puntos) donde sea necesario.
+4) Corrige errores de transcripcion evidentes (palabras mal captadas por el reconocimiento de voz).
+5) NO cambies el tono, el estilo ni el nivel de formalidad.
+6) NO agregues palabras que el hablante no dijo.
+7) NO resumas, NO reorganices, NO "mejores" el texto.
+8) Si el texto ya esta bien, devuelvelo igual.
 
-REGLAS OBLIGATORIAS:
-1) Elimina muletillas y relleno (eh, um, mmm, bueno, o sea, tipo, es que, digamos, como que, etc.).
-2) Corrige ortografia y gramatica sin cambiar significado.
-3) Reestructura frases confusas para claridad, sin alterar intencion.
-4) Formatea con puntuacion, parrafos y estructura natural.
-5) Mantiene la personalidad y registro del hablante (formal/informal).
-6) NO inventes informacion y NO cambies el sentido.
-7) Si el texto es corto o ambiguo, devuelve igual o con correcciones minimas.
-
-TONO/CONTEXTO:
-Detecta automaticamente el contexto (email, chat, Slack, nota personal, tecnico, red social, legal, atencion al cliente, creativo, academico) y ajusta tono en consecuencia.
-Si no es claro, usa neutral-profesional.
-
-MULTILINGUE:
-Detecta idioma automaticamente y responde en el mismo idioma.
-Si hay cambio de idioma dentro del dictado, conserva cada seccion en su idioma.
-
-COMANDOS DE VOZ ESPECIALES (si aparecen en el dictado, ejecutalos):
-- "borra eso" / "eliminar eso": elimina la ultima oracion o fragmento previo.
-- "en negrita [texto]": aplica negrita solo a ese fragmento.
-- "hace una lista con...": convierte lo siguiente en lista.
-- "nuevo parrafo": inserta salto de parrafo.
-- "tono mas formal": rehace con tono mas formal.
-- "tono mas casual": rehace con tono mas casual.
-- "resumi esto": entrega un resumen conciso del dictado.
-- "agrega un asunto": genera una linea de asunto si corresponde a email.
-- "ponelo en modo email": formatea como email profesional con saludo, cuerpo y cierre.
-- "puntos clave": extrae y lista los puntos principales.
+PROHIBIDO:
+- Cambiar "voy a" por "me dirigire a"
+- Cambiar palabras informales por formales
+- Agregar frases de cortesia que no se dijeron
+- Reestructurar el orden de las ideas
+- Inventar contenido
 ${dictionaryBlock}${snippetsBlock}
 
-SALIDA:
-- Devuelve SOLO el texto final editado listo para usar.
+SALIDA: Devuelve SOLO el texto limpio, nada mas.
 - Nunca incluyas explicaciones, etiquetas, metadatos ni prefacios.`;
 }
 
@@ -261,11 +311,6 @@ function normalizeShortcut(rawShortcut) {
 let selfBundleId = null;
 
 function initSelfBundleId() {
-  try {
-    const bid = app.getBundleID();
-    if (bid) { selfBundleId = bid; return; }
-  } catch { /* ignore */ }
-
   if (process.platform === "darwin") {
     try {
       const out = execSync(
@@ -316,35 +361,57 @@ function pasteTextOnMac(text) {
     console.log("[Voz Flow] Clipboard set OK");
   } catch (err) {
     console.error("[Voz Flow] pbcopy FAILED:", err.message);
+    notifyPasteResult(false, "No se pudo copiar al portapapeles");
     return;
   }
 
-  // 2. Build a SINGLE atomic AppleScript: activate via shell + delay + Cmd+V
-  //    No setTimeout — everything runs inside osascript so nothing can steal focus in between
+  // 2. Build atomic AppleScript: activate via shell + delay + Cmd+V
+  //    Each statement is a separate -e flag so osascript parses them correctly
   const escapedBundle = String(target.bundleId || "")
     .replace(/'/g, "'\\''")
     .trim();
 
-  const activateLine = escapedBundle
-    ? `do shell script "open -b '${escapedBundle}'"
-       delay 0.3`
-    : "delay 0.1";
+  const lines = escapedBundle
+    ? [
+        `do shell script "open -b '${escapedBundle}'"`,
+        `delay 0.5`,
+        `tell application "System Events" to keystroke "v" using {command down}`,
+      ]
+    : [
+        `delay 0.15`,
+        `tell application "System Events" to keystroke "v" using {command down}`,
+      ];
 
-  const appleScript = `
-    ${activateLine}
-    tell application "System Events" to keystroke "v" using {command down}
-  `;
+  const osascriptCmd = lines.map((l) => `-e ${JSON.stringify(l)}`).join(" ");
 
-  console.log("[Voz Flow] Running atomic AppleScript (activate + paste)...");
-  exec(`osascript -e ${JSON.stringify(appleScript)}`, (error, _stdout, stderr) => {
-    if (error) {
-      console.error("[Voz Flow] AppleScript FAILED:", error.message);
-      if (stderr) console.error("[Voz Flow] stderr:", stderr);
-    } else {
-      console.log(`[Voz Flow] Pasted OK into ${targetLabel}`);
-    }
-    console.log("[Voz Flow] === PASTE END ===");
-  });
+  const runPaste = (attempt) => {
+    console.log(`[Voz Flow] Paste attempt ${attempt}...`);
+    exec(`osascript ${osascriptCmd}`, (error, _stdout, stderr) => {
+      if (error) {
+        console.error(`[Voz Flow] AppleScript FAILED (attempt ${attempt}):`, error.message);
+        if (stderr) console.error("[Voz Flow] stderr:", stderr);
+        if (attempt < 2) {
+          console.log("[Voz Flow] Retrying paste in 600ms...");
+          setTimeout(() => runPaste(attempt + 1), 600);
+        } else {
+          console.log("[Voz Flow] === PASTE END (failed) ===");
+          notifyPasteResult(false, `No se pudo pegar en ${targetLabel}`);
+        }
+      } else {
+        console.log(`[Voz Flow] Pasted OK into ${targetLabel}`);
+        console.log("[Voz Flow] === PASTE END ===");
+        notifyPasteResult(true);
+      }
+    });
+  };
+
+  runPaste(1);
+}
+
+function notifyPasteResult(ok, errorMessage) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("paste-result", { ok, error: errorMessage || null });
+  }
 }
 
 function checkMacPermissions() {
@@ -447,16 +514,18 @@ function setIndicatorVisible(isRecording) {
 }
 
 function dispatchToggleRecordingToRenderer() {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    createWindow();
-    return;
-  }
-
   const sendToggle = () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("toggle-recording");
     }
   };
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    // Create window silently (no show/focus) — just need it for IPC
+    createWindow({ silent: true });
+    mainWindow.webContents.once("did-finish-load", sendToggle);
+    return;
+  }
 
   if (mainWindow.webContents.isLoading()) {
     mainWindow.webContents.once("did-finish-load", sendToggle);
@@ -488,24 +557,28 @@ function registerRecordingShortcut(preferredShortcut, allowFallback = true) {
 
   for (const shortcut of candidates) {
     const ok = globalShortcut.register(shortcut, () => {
-      // Toggle recording FIRST (instant feedback), then capture target app
+      const wasRecording = shortcutRecordingState;
       shortcutRecordingState = !shortcutRecordingState;
+
+      // Capture target app ONLY when STARTING recording (not when stopping)
+      // This preserves the original chat app even if focus changed during recording
+      if (!wasRecording && shortcutRecordingState) {
+        try {
+          if (process.platform === "darwin") {
+            const focused = captureFrontmostApp();
+            if (focused.bundleId && focused.bundleId !== selfBundleId) {
+              lastTargetAppBundleId = focused.bundleId;
+              lastTargetAppName = focused.appName;
+              console.log(`[Voz Flow] Target captured on START: ${focused.appName} (${focused.bundleId})`);
+            }
+          }
+        } catch (err) {
+          console.error("[Voz Flow] Error capturing target (non-fatal):", err.message);
+        }
+      }
+
       setIndicatorVisible(shortcutRecordingState);
       dispatchToggleRecordingToRenderer();
-
-      // Capture target app in background — never blocks UI
-      try {
-        if (process.platform === "darwin") {
-          const focused = captureFrontmostApp();
-          if (focused.bundleId && focused.bundleId !== selfBundleId) {
-            lastTargetAppBundleId = focused.bundleId;
-            lastTargetAppName = focused.appName;
-            console.log(`[Voz Flow] Target: ${focused.appName} (${focused.bundleId})`);
-          }
-        }
-      } catch (err) {
-        console.error("[Voz Flow] Error capturing target (non-fatal):", err.message);
-      }
     });
 
     if (ok) {
@@ -530,6 +603,7 @@ function getDockIconPath() {
 }
 
 function createTray() {
+  if (tray) return; // Already created
   const iconPath = isDev
     ? path.join(__dirname, "../public/tray-icon.png")
     : path.join(__dirname, "../out/tray-icon.png");
@@ -585,10 +659,10 @@ function createIndicatorWindow() {
   const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
 
   indicatorWindow = new BrowserWindow({
-    width: 38,
-    height: 36,
-    x: Math.round(screenW / 2 - 19),
-    y: screenH - 60,
+    width: 32,
+    height: 28,
+    x: Math.round(screenW / 2 - 16),
+    y: screenH - 50,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
@@ -607,24 +681,21 @@ function createIndicatorWindow() {
   indicatorWindow.setAlwaysOnTop(true, "screen-saver");
   indicatorWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
-  const pillPath = isDev
-    ? path.join(__dirname, "pill.html")
-    : path.join(__dirname, "pill.html");
-  indicatorWindow.loadFile(pillPath);
+  indicatorWindow.loadFile(path.join(__dirname, "pill.html"));
 
   indicatorWindow.once("ready-to-show", () => {
     indicatorWindow.showInactive();
   });
-
-  // Handle resize requests from pill HTML
-  ipcMain.on("pill-resize", (event, width, height) => {
-    if (indicatorWindow && !indicatorWindow.isDestroyed()) {
-      indicatorWindow.setSize(Math.max(38, Math.round(width)), Math.round(height));
-    }
-  });
 }
 
-function createWindow() {
+// pill-resize handler — registered once at module scope
+ipcMain.on("pill-resize", (event, width, height) => {
+  if (indicatorWindow && !indicatorWindow.isDestroyed()) {
+    indicatorWindow.setSize(Math.max(32, Math.round(width)), Math.round(height));
+  }
+});
+
+function createWindow({ silent = false } = {}) {
   const win = new BrowserWindow({
     width: 1100,
     height: 750,
@@ -671,20 +742,13 @@ function createWindow() {
   });
 
   win.once("ready-to-show", () => {
-    if (!win.isDestroyed()) {
+    if (!win.isDestroyed() && !silent) {
       win.show();
     }
   });
 
-  const savedShortcut = loadSavedShortcut();
-  const normalizedSaved = normalizeShortcut(savedShortcut);
-  const preferredShortcut = normalizedSaved.ok
-    ? normalizedSaved.shortcut
-    : null;
-  registerRecordingShortcut(preferredShortcut, true);
-
-  createTray();
-  createIndicatorWindow();
+  // Shortcut, tray, and indicator are initialized once from app.whenReady()
+  // Not here — createWindow() can be called multiple times
 
   win.on("close", (event) => {
     if (!app.isQuitting) {
@@ -716,9 +780,14 @@ app.whenReady().then(() => {
     console.warn("[Voz Flow] DB init failed (history disabled):", err.message);
   }
 
-  // Load double-tap settings
+  // Load double-tap settings and start listener
   const settings = loadSettings();
   doubleTapEnabled = settings.doubleTapEnabled !== false;
+  try {
+    startDoubleTapListener();
+  } catch (err) {
+    console.error("[Voz Flow] Failed to start double-tap listener:", err.message);
+  }
 
   if (process.platform === "darwin" && app.dock) {
     try {
@@ -728,7 +797,15 @@ app.whenReady().then(() => {
     }
   }
 
-  createWindow();
+  createWindow({ silent: true });
+
+  // Register shortcut, tray, and indicator ONCE here (not inside createWindow)
+  const savedShortcut = loadSavedShortcut();
+  const normalizedSaved = normalizeShortcut(savedShortcut);
+  const preferredShortcut = normalizedSaved.ok ? normalizedSaved.shortcut : null;
+  registerRecordingShortcut(preferredShortcut, true);
+  createTray();
+  createIndicatorWindow();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -741,6 +818,8 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   app.isQuitting = true;
+  // Stop uiohook keyboard listener
+  try { uIOhook.stop(); } catch { /* ignore */ }
   if (tray) {
     tray.destroy();
     tray = null;
@@ -911,7 +990,7 @@ ipcMain.on("recording-state", (event, isRecording) => {
 });
 
 ipcMain.on("type-text", (event, text) => {
-  console.log("Typing text parity:", text.substring(0, 20) + "...");
+  if (isDev) console.log("[Voz Flow] type-text received, length:", (text || "").length);
 
   if (process.platform === "win32") {
     // Mejorado para Windows: Usamos portapapeles y pegado para evitar problemas de caracteres
@@ -934,6 +1013,13 @@ ipcMain.handle(
   "transcribe-audio",
   async (event, audioBuffer, rawFlowConfig) => {
     try {
+      // Validate audio buffer is not empty or too small (<1KB likely silence)
+      if (!audioBuffer || audioBuffer.byteLength < 1000) {
+        console.log("[Voz Flow] Audio too short/empty, skipping transcription");
+        setAppState(AppState.IDLE);
+        return { original: "", refined: "" };
+      }
+
       const apiKey = process.env.GROQ_API_KEY || loadSavedApiKey();
       if (!apiKey) {
         throw new Error(
@@ -946,41 +1032,63 @@ ipcMain.handle(
         apiKey,
       });
 
+      // Helper: race a promise against a timeout
+      const withTimeout = (promise, ms, label) =>
+        Promise.race([
+          promise,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Timeout: ${label} tardo mas de ${ms / 1000}s`)), ms),
+          ),
+        ]);
+
       // 1. Transcribir con Groq Whisper
-      const tempPath = path.join(
+      var _tempPath = path.join(
         app.getPath("temp"),
         `audio_${Date.now()}.webm`,
       );
-      fs.writeFileSync(tempPath, Buffer.from(audioBuffer));
+      fs.writeFileSync(_tempPath, Buffer.from(audioBuffer));
 
-      const transcription = await groq.audio.transcriptions.create({
-        file: fs.createReadStream(tempPath),
-        model: "whisper-large-v3",
-        response_format: "verbose_json",
-      });
+      const transcription = await withTimeout(
+        groq.audio.transcriptions.create({
+          file: fs.createReadStream(tempPath),
+          model: "whisper-large-v3",
+          response_format: "verbose_json",
+          language: "es",
+          prompt: "Transcripcion de dictado por voz en español.",
+        }),
+        30000,
+        "Transcripcion",
+      );
 
-      const originalText = transcription.text;
+      const originalText = (transcription.text || "").trim();
+
+      // Skip refinement if Whisper returned nothing
+      if (!originalText) {
+        setAppState(AppState.IDLE);
+        return { original: "", refined: "" };
+      }
+
       const flowConfig = sanitizeFlowConfig(rawFlowConfig);
 
       // 2. Refinar con Llama 3
-      const chatCompletion = await groq.chat.completions.create({
-        messages: [
-          {
-            role: "system",
-            content: buildFlowSystemPrompt(flowConfig),
-          },
-          {
-            role: "user",
-            content: originalText,
-          },
-        ],
-        model: "llama-3.3-70b-versatile",
-        temperature: 0.1,
-      });
-
-      try {
-        fs.unlinkSync(tempPath);
-      } catch (e) { }
+      const chatCompletion = await withTimeout(
+        groq.chat.completions.create({
+          messages: [
+            {
+              role: "system",
+              content: buildFlowSystemPrompt(flowConfig),
+            },
+            {
+              role: "user",
+              content: originalText,
+            },
+          ],
+          model: "llama-3.3-70b-versatile",
+          temperature: 0.1,
+        }),
+        15000,
+        "Refinamiento",
+      );
 
       const refinedText = chatCompletion.choices[0]?.message?.content || originalText;
       console.log("[Voz Flow] Refinamiento completado. Caracteres:", refinedText.length);
@@ -1022,6 +1130,9 @@ ipcMain.handle(
         );
       }
       throw error;
+    } finally {
+      // Always clean up temp audio file
+      if (_tempPath) { try { fs.unlinkSync(_tempPath); } catch { } }
     }
   },
 );

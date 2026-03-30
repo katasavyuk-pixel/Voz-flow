@@ -32,6 +32,13 @@ contextBridge.exposeInMainWorld("electron", {
     return () => ipcRenderer.removeListener("app-state-changed", listener);
   },
 
+  // --- Paste result feedback ---
+  onPasteResult: (callback) => {
+    const listener = (_, result) => callback(result);
+    ipcRenderer.on("paste-result", listener);
+    return () => ipcRenderer.removeListener("paste-result", listener);
+  },
+
   // --- NEW: Audio data (renderer → main → pill) ---
   sendAudioData: (barValues) => ipcRenderer.send("audio-data", barValues),
 
