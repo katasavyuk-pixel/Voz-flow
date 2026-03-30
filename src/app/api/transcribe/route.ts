@@ -145,8 +145,10 @@ export async function POST(req: NextRequest) {
       temperature: 0.1,
     });
 
-    const refinedText =
+    let refinedText =
       chatCompletion.choices[0]?.message?.content || originalText;
+    // Normalize Unicode to NFC form for consistent character handling (fixes encoding issues with special chars)
+    refinedText = refinedText.normalize("NFC");
 
     return NextResponse.json({
       original: originalText,

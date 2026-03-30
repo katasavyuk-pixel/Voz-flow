@@ -8,6 +8,7 @@ const {
   Menu,
   nativeImage,
   shell,
+  clipboard,
 } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -52,7 +53,7 @@ const AUDIO_FORWARD_INTERVAL = 33; // ~30fps
 
 // === DOUBLE-TAP CTRL: global keyboard listener via uiohook-napi ===
 let doubleTapCooldown = 0; // Cooldown to prevent instant re-trigger
-let ctrlIsDown = false;    // Track key-down to ignore repeats
+let ctrlIsDown = false; // Track key-down to ignore repeats
 
 function startDoubleTapListener() {
   // Use keydown to track press state, keyup to count taps
@@ -67,7 +68,8 @@ function startDoubleTapListener() {
 
   uIOhook.on("keyup", (e) => {
     if (!doubleTapEnabled) return;
-    if (e.keycode !== UiohookKey.Ctrl && e.keycode !== UiohookKey.CtrlRight) return;
+    if (e.keycode !== UiohookKey.Ctrl && e.keycode !== UiohookKey.CtrlRight)
+      return;
 
     ctrlIsDown = false;
     const now = Date.now();
@@ -98,11 +100,16 @@ function startDoubleTapListener() {
             if (focused.bundleId && focused.bundleId !== selfBundleId) {
               lastTargetAppBundleId = focused.bundleId;
               lastTargetAppName = focused.appName;
-              console.log(`[Voz Flow] Target captured on double-tap: ${focused.appName} (${focused.bundleId})`);
+              console.log(
+                `[Voz Flow] Target captured on double-tap: ${focused.appName} (${focused.bundleId})`,
+              );
             }
           }
         } catch (err) {
-          console.error("[Voz Flow] Error capturing target (non-fatal):", err.message);
+          console.error(
+            "[Voz Flow] Error capturing target (non-fatal):",
+            err.message,
+          );
         }
       }
 
@@ -133,20 +140,20 @@ function sanitizeFlowConfig(rawConfig) {
 
   const personalDictionary = Array.isArray(rawConfig.personalDictionary)
     ? rawConfig.personalDictionary
-      .map((entry) => String(entry).trim())
-      .filter(Boolean)
+        .map((entry) => String(entry).trim())
+        .filter(Boolean)
     : [];
 
   const snippets = Array.isArray(rawConfig.snippets)
     ? rawConfig.snippets
-      .map((item) => {
-        if (!item || typeof item !== "object") return null;
-        const trigger = String(item.trigger || "").trim();
-        const output = String(item.output || "").trim();
-        if (!trigger || !output) return null;
-        return { trigger, output };
-      })
-      .filter((item) => item !== null)
+        .map((item) => {
+          if (!item || typeof item !== "object") return null;
+          const trigger = String(item.trigger || "").trim();
+          const output = String(item.output || "").trim();
+          if (!trigger || !output) return null;
+          return { trigger, output };
+        })
+        .filter((item) => item !== null)
     : [];
 
   return { personalDictionary, snippets };
@@ -155,14 +162,14 @@ function sanitizeFlowConfig(rawConfig) {
 function buildFlowSystemPrompt(config) {
   const dictionaryBlock = config.personalDictionary.length
     ? `\n\nDICCIONARIO PERSONAL (obligatorio):\n${config.personalDictionary
-      .map((term) => `- ${term}`)
-      .join("\n")}`
+        .map((term) => `- ${term}`)
+        .join("\n")}`
     : "";
 
   const snippetsBlock = config.snippets.length
     ? `\n\nSNIPPETS (reemplazo obligatorio cuando detectes el trigger):\n${config.snippets
-      .map((snippet) => `- ${snippet.trigger} -> ${snippet.output}`)
-      .join("\n")}`
+        .map((snippet) => `- ${snippet.trigger} -> ${snippet.output}`)
+        .join("\n")}`
     : "";
 
   return `Eres un limpiador minimo de transcripciones de voz. Tu trabajo es hacer el MENOR cambio posible para que el texto sea legible.
@@ -317,8 +324,13 @@ function initSelfBundleId() {
         `osascript -e 'tell application "System Events" to get bundle identifier of first application process whose unix id is ${process.pid}'`,
         { encoding: "utf8", timeout: 3000 },
       ).trim();
-      if (out && out !== "missing value") { selfBundleId = out; return; }
-    } catch { /* ignore */ }
+      if (out && out !== "missing value") {
+        selfBundleId = out;
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
   }
 
   selfBundleId = "com.vozflow.app";
@@ -332,7 +344,9 @@ function captureFrontmostApp() {
     const out = execSync(
       `osascript -e 'tell application "System Events" to set fp to first application process whose frontmost is true' -e 'return (bundle identifier of fp) & "|" & (name of fp)'`,
       { encoding: "utf8", timeout: 1500 },
-    ).trim().replace(/\r?\n/g, "");
+    )
+      .trim()
+      .replace(/\r?\n/g, "");
     const [bundleId, appName] = out.split("|");
     return { bundleId: bundleId || null, appName: appName || null };
   } catch {
@@ -343,7 +357,10 @@ function captureFrontmostApp() {
 function resolveTargetAppForPaste() {
   // Always use the target saved when shortcut was pressed — no extra execSync here
   if (lastTargetAppBundleId) {
-    return { bundleId: lastTargetAppBundleId, appName: lastTargetAppName || null };
+    return {
+      bundleId: lastTargetAppBundleId,
+      appName: lastTargetAppName || null,
+    };
   }
   return { bundleId: null, appName: null };
 }
@@ -352,15 +369,20 @@ function pasteTextOnMac(text) {
   const target = resolveTargetAppForPaste();
   const targetLabel = target.appName || target.bundleId || "Unknown App";
   console.log(`[Voz Flow] === PASTE START ===`);
-  console.log(`[Voz Flow] Target: ${targetLabel} (bundle: ${target.bundleId || "N/A"})`);
-  console.log(`[Voz Flow] Text length: ${(text || "").length}`);
+  console.log(
+    `[Voz Flow] Target: ${targetLabel} (bundle: ${target.bundleId || "N/A"})`,
+  );
 
-  // 1. Set clipboard synchronously via pbcopy
+  // Ensure text is properly normalized
+  const normalizedText = String(text || "").normalize("NFC");
+  console.log(`[Voz Flow] Text length: ${normalizedText.length}`);
+
+  // Use Electron's native clipboard module - handles Unicode perfectly
   try {
-    execSync("pbcopy", { input: text, encoding: "utf8" });
-    console.log("[Voz Flow] Clipboard set OK");
+    clipboard.writeText(normalizedText);
+    console.log("[Voz Flow] Clipboard set OK via Electron clipboard module");
   } catch (err) {
-    console.error("[Voz Flow] pbcopy FAILED:", err.message);
+    console.error("[Voz Flow] Electron clipboard.writeText FAILED:", err.message);
     notifyPasteResult(false, "No se pudo copiar al portapapeles");
     return;
   }
@@ -388,7 +410,10 @@ function pasteTextOnMac(text) {
     console.log(`[Voz Flow] Paste attempt ${attempt}...`);
     exec(`osascript ${osascriptCmd}`, (error, _stdout, stderr) => {
       if (error) {
-        console.error(`[Voz Flow] AppleScript FAILED (attempt ${attempt}):`, error.message);
+        console.error(
+          `[Voz Flow] AppleScript FAILED (attempt ${attempt}):`,
+          error.message,
+        );
         if (stderr) console.error("[Voz Flow] stderr:", stderr);
         if (attempt < 2) {
           console.log("[Voz Flow] Retrying paste in 600ms...");
@@ -410,7 +435,10 @@ function pasteTextOnMac(text) {
 
 function notifyPasteResult(ok, errorMessage) {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("paste-result", { ok, error: errorMessage || null });
+    mainWindow.webContents.send("paste-result", {
+      ok,
+      error: errorMessage || null,
+    });
   }
 }
 
@@ -569,11 +597,16 @@ function registerRecordingShortcut(preferredShortcut, allowFallback = true) {
             if (focused.bundleId && focused.bundleId !== selfBundleId) {
               lastTargetAppBundleId = focused.bundleId;
               lastTargetAppName = focused.appName;
-              console.log(`[Voz Flow] Target captured on START: ${focused.appName} (${focused.bundleId})`);
+              console.log(
+                `[Voz Flow] Target captured on START: ${focused.appName} (${focused.bundleId})`,
+              );
             }
           }
         } catch (err) {
-          console.error("[Voz Flow] Error capturing target (non-fatal):", err.message);
+          console.error(
+            "[Voz Flow] Error capturing target (non-fatal):",
+            err.message,
+          );
         }
       }
 
@@ -656,7 +689,8 @@ function createTray() {
 }
 
 function createIndicatorWindow() {
-  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
+  const { width: screenW, height: screenH } =
+    screen.getPrimaryDisplay().workAreaSize;
 
   indicatorWindow = new BrowserWindow({
     width: 32,
@@ -679,7 +713,9 @@ function createIndicatorWindow() {
   });
 
   indicatorWindow.setAlwaysOnTop(true, "screen-saver");
-  indicatorWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  indicatorWindow.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: true,
+  });
 
   indicatorWindow.loadFile(path.join(__dirname, "pill.html"));
 
@@ -691,7 +727,10 @@ function createIndicatorWindow() {
 // pill-resize handler — registered once at module scope
 ipcMain.on("pill-resize", (event, width, height) => {
   if (indicatorWindow && !indicatorWindow.isDestroyed()) {
-    indicatorWindow.setSize(Math.max(32, Math.round(width)), Math.round(height));
+    indicatorWindow.setSize(
+      Math.max(32, Math.round(width)),
+      Math.round(height),
+    );
   }
 });
 
@@ -775,7 +814,9 @@ app.whenReady().then(() => {
   // Initialize local SQLite database
   try {
     db = new TranscriptionDB();
-    console.log(`[Voz Flow] DB initialized. ${db.count()} transcriptions stored.`);
+    console.log(
+      `[Voz Flow] DB initialized. ${db.count()} transcriptions stored.`,
+    );
   } catch (err) {
     console.warn("[Voz Flow] DB init failed (history disabled):", err.message);
   }
@@ -786,7 +827,10 @@ app.whenReady().then(() => {
   try {
     startDoubleTapListener();
   } catch (err) {
-    console.error("[Voz Flow] Failed to start double-tap listener:", err.message);
+    console.error(
+      "[Voz Flow] Failed to start double-tap listener:",
+      err.message,
+    );
   }
 
   if (process.platform === "darwin" && app.dock) {
@@ -802,7 +846,9 @@ app.whenReady().then(() => {
   // Register shortcut, tray, and indicator ONCE here (not inside createWindow)
   const savedShortcut = loadSavedShortcut();
   const normalizedSaved = normalizeShortcut(savedShortcut);
-  const preferredShortcut = normalizedSaved.ok ? normalizedSaved.shortcut : null;
+  const preferredShortcut = normalizedSaved.ok
+    ? normalizedSaved.shortcut
+    : null;
   registerRecordingShortcut(preferredShortcut, true);
   createTray();
   createIndicatorWindow();
@@ -819,7 +865,11 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   app.isQuitting = true;
   // Stop uiohook keyboard listener
-  try { uIOhook.stop(); } catch { /* ignore */ }
+  try {
+    uIOhook.stop();
+  } catch {
+    /* ignore */
+  }
   if (tray) {
     tray.destroy();
     tray = null;
@@ -829,7 +879,11 @@ app.on("before-quit", () => {
   }
   // Close SQLite DB
   if (db) {
-    try { db.close(); } catch { /* ignore */ }
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
     db = null;
   }
 });
@@ -992,16 +1046,30 @@ ipcMain.on("recording-state", (event, isRecording) => {
 ipcMain.on("type-text", (event, text) => {
   console.log("[Voz Flow] type-text received, length:", (text || "").length);
 
-  if (process.platform === "win32") {
-    // Mejorado para Windows: Usamos portapapeles y pegado para evitar problemas de caracteres
-    const escapedText = text.replace(/"/g, '`"').replace(/\n/g, " ");
-    const psCommand = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::SetText("${escapedText}"); [System.Windows.Forms.SendKeys]::SendWait("^v")`;
+  // Ensure text is properly UTF-8 encoded and normalized
+  const textStr = String(text || "").normalize("NFC");
 
-    exec(`powershell -Command "${psCommand}"`, (error) => {
-      if (error) console.error("Error typing text (Windows):", error);
-    });
+  if (process.platform === "win32") {
+    // Windows: Use UTF-8 with BOM for proper character handling
+    const escapedText = textStr.replace(/"/g, '""').replace(/`/g, "``");
+    // Use -OutputFormat Text to ensure UTF-8 output and -Encoding UTF8 for input
+    const psCommand = [
+      "$OutputEncoding = [System.Text.Encoding]::UTF8",
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+      "Add-Type -AssemblyName System.Windows.Forms",
+      `[System.Windows.Forms.Clipboard]::SetText("${escapedText}")`,
+      "[System.Windows.Forms.SendKeys]::SendWait('^v')",
+    ].join("; ");
+
+    exec(
+      `powershell -ExecutionPolicy Bypass -Command "${psCommand}"`,
+      { encoding: "utf8" },
+      (error) => {
+        if (error) console.error("Error typing text (Windows):", error);
+      },
+    );
   } else if (process.platform === "darwin") {
-    pasteTextOnMac(text);
+    pasteTextOnMac(textStr);
   }
 });
 
@@ -1037,7 +1105,13 @@ ipcMain.handle(
         Promise.race([
           promise,
           new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`Timeout: ${label} tardo mas de ${ms / 1000}s`)), ms),
+            setTimeout(
+              () =>
+                reject(
+                  new Error(`Timeout: ${label} tardo mas de ${ms / 1000}s`),
+                ),
+              ms,
+            ),
           ),
         ]);
 
@@ -1090,8 +1164,14 @@ ipcMain.handle(
         "Refinamiento",
       );
 
-      const refinedText = chatCompletion.choices[0]?.message?.content || originalText;
-      console.log("[Voz Flow] Refinamiento completado. Caracteres:", refinedText.length);
+      let refinedText =
+        chatCompletion.choices[0]?.message?.content || originalText;
+      // Normalize Unicode to NFC form for consistent character handling (fixes encoding issues with special chars)
+      refinedText = refinedText.normalize("NFC");
+      console.log(
+        "[Voz Flow] Refinamiento completado. Caracteres:",
+        refinedText.length,
+      );
 
       // Auto-save to local SQLite DB
       try {
@@ -1106,7 +1186,10 @@ ipcMain.handle(
           console.log("[Voz Flow] Transcripcion guardada en DB local");
         }
       } catch (dbErr) {
-        console.error("[Voz Flow] Error guardando en DB (non-fatal):", dbErr.message);
+        console.error(
+          "[Voz Flow] Error guardando en DB (non-fatal):",
+          dbErr.message,
+        );
       }
 
       // Transition to DONE state
@@ -1120,19 +1203,26 @@ ipcMain.handle(
       console.error("[Voz Flow] Error en transcribe-audio (Electron):", error);
       setAppState(AppState.ERROR);
 
-      if (error.status === 403 || (error.message && error.message.includes("403"))) {
+      if (
+        error.status === 403 ||
+        (error.message && error.message.includes("403"))
+      ) {
         throw new Error(
           "Error 403 (Acceso Denegado) de Groq. Esto suele ocurrir por:\n" +
-          "1. API Key inválida o caducada.\n" +
-          "2. Tu región está bloqueada por Groq.\n" +
-          "3. Estás usando una VPN o Proxy que Groq está bloqueando.\n\n" +
-          "Por favor, revisa tu conexión y prueba a generar una nueva API Key en console.groq.com."
+            "1. API Key inválida o caducada.\n" +
+            "2. Tu región está bloqueada por Groq.\n" +
+            "3. Estás usando una VPN o Proxy que Groq está bloqueando.\n\n" +
+            "Por favor, revisa tu conexión y prueba a generar una nueva API Key en console.groq.com.",
         );
       }
       throw error;
     } finally {
       // Always clean up temp audio file
-      if (_tempPath) { try { fs.unlinkSync(_tempPath); } catch { } }
+      if (_tempPath) {
+        try {
+          fs.unlinkSync(_tempPath);
+        } catch {}
+      }
     }
   },
 );
