@@ -13,8 +13,8 @@
     "format": "prettier --write .",
     "electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3333 && electron .\"",
     "electron-build": "node scripts/build-electron.js",
-    "app": "npm run electron-build && open dist/Voz\\ Flow.app",
-    "app:open": "open dist/Voz\\ Flow.app",
+    "app": "npm run electron-build && open \"dist/mac-arm64/Voz Flow.app\" || open \"dist/mac/Voz Flow.app\"",
+    "app:open": "open \"dist/mac-arm64/Voz Flow.app\" || open \"dist/mac/Voz Flow.app\"",
     "postinstall": "electron-rebuild -f -w better-sqlite3 -w uiohook-napi 2>/dev/null || true"
   },
   "dependencies": {
