@@ -990,7 +990,7 @@ ipcMain.on("recording-state", (event, isRecording) => {
 });
 
 ipcMain.on("type-text", (event, text) => {
-  if (isDev) console.log("[Voz Flow] type-text received, length:", (text || "").length);
+  console.log("[Voz Flow] type-text received, length:", (text || "").length);
 
   if (process.platform === "win32") {
     // Mejorado para Windows: Usamos portapapeles y pegado para evitar problemas de caracteres
@@ -1050,7 +1050,7 @@ ipcMain.handle(
 
       const transcription = await withTimeout(
         groq.audio.transcriptions.create({
-          file: fs.createReadStream(tempPath),
+          file: fs.createReadStream(_tempPath),
           model: "whisper-large-v3",
           response_format: "verbose_json",
           language: "es",
